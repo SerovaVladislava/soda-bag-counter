@@ -1,0 +1,10 @@
+logLevel: info
+rtspTransports: [tcp]
+rtmp: false
+hls: false
+webrtc: false
+srt: false
+
+paths:
+  all_others:
+

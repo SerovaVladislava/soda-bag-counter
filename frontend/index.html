@@ -1,0 +1,1620 @@
+<!DOCTYPE html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>RTSP-потоки</title>
+    <style>
+      :root {
+        --bg: #f4efe7;
+        --panel: #fffdf9;
+        --surface: #fff;
+        --ink: #211d18;
+        --muted: #6b6257;
+        --border: #d8cfc1;
+        --accent: #9c4729;
+        --accent-dark: #6f2f19;
+        --shadow: 0 18px 50px rgba(78, 52, 35, 0.08);
+        --ok-bg: #e7f7ef;
+        --ok-ink: #1b6a45;
+        --warn-bg: #fff1d6;
+        --warn-ink: #8a5a00;
+        --bad-bg: #fde7e4;
+        --bad-ink: #96382f;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        color: var(--ink);
+        background:
+          radial-gradient(circle at top left, rgba(156, 71, 41, 0.12), transparent 28%),
+          linear-gradient(180deg, #f8f4ec 0%, var(--bg) 100%);
+      }
+
+      a {
+        color: inherit;
+      }
+
+      button,
+      input {
+        font: inherit;
+      }
+
+      .shell {
+        width: min(1120px, calc(100% - 24px));
+        margin: 20px auto 40px;
+      }
+
+      .hero {
+        margin-bottom: 18px;
+        padding: 24px;
+        border: 1px solid rgba(156, 71, 41, 0.15);
+        border-radius: 24px;
+        background:
+          linear-gradient(135deg, rgba(156, 71, 41, 0.1), rgba(255, 255, 255, 0.7)),
+          var(--panel);
+        box-shadow: var(--shadow);
+      }
+
+      .eyebrow {
+        margin: 0 0 8px;
+        color: var(--accent);
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: clamp(28px, 4vw, 48px);
+        line-height: 1.05;
+      }
+
+      .lead {
+        margin: 12px 0 0;
+        max-width: 760px;
+        color: var(--muted);
+        line-height: 1.55;
+      }
+
+      .tabs {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin: 0 0 18px;
+      }
+
+      .tab-button {
+        border: 1px solid transparent;
+        border-radius: 999px;
+        padding: 11px 18px;
+        background: rgba(255, 255, 255, 0.7);
+        color: var(--ink);
+        font-weight: 700;
+        cursor: pointer;
+      }
+
+      .tab-button.active {
+        background: var(--accent);
+        color: #fff;
+      }
+
+      .tab-panel {
+        display: none;
+      }
+
+      .tab-panel.active {
+        display: block;
+      }
+
+      .grid {
+        display: grid;
+        gap: 16px;
+      }
+
+      .grid.two {
+        grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      }
+
+      .card {
+        padding: 18px;
+        border: 1px solid var(--border);
+        border-radius: 20px;
+        background: var(--panel);
+        box-shadow: var(--shadow);
+      }
+
+      .card h2 {
+        margin: 0 0 14px;
+        font-size: 15px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .stack {
+        display: grid;
+        gap: 14px;
+      }
+
+      .field {
+        display: grid;
+        gap: 8px;
+      }
+
+      .field-label {
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+
+      input[type="text"],
+      input[type="url"],
+      input[type="number"],
+      input[type="date"],
+      input[type="file"],
+      select {
+        width: 100%;
+        min-height: 46px;
+        padding: 11px 14px;
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        background: var(--surface);
+        color: var(--ink);
+      }
+
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+
+      button {
+        border: none;
+        border-radius: 999px;
+        padding: 11px 16px;
+        font-weight: 700;
+        cursor: pointer;
+      }
+
+      button:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+      }
+
+      .primary {
+        background: var(--accent);
+        color: #fff;
+      }
+
+      .secondary {
+        background: #ece4d8;
+        color: var(--ink);
+      }
+
+      .message {
+        min-height: 22px;
+        font-weight: 700;
+      }
+
+      .message.ok {
+        color: var(--ok-ink);
+      }
+
+      .message.warn {
+        color: var(--warn-ink);
+      }
+
+      .message.error {
+        color: var(--bad-ink);
+      }
+
+      .hint {
+        margin: 0;
+        color: var(--muted);
+        line-height: 1.5;
+      }
+
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 7px 12px;
+        border-radius: 999px;
+        background: #ede6dc;
+        font-size: 13px;
+        font-weight: 700;
+      }
+
+      .pill[data-state="ok"] {
+        background: var(--ok-bg);
+        color: var(--ok-ink);
+      }
+
+      .pill[data-state="warn"] {
+        background: var(--warn-bg);
+        color: var(--warn-ink);
+      }
+
+      .pill[data-state="bad"] {
+        background: var(--bad-bg);
+        color: var(--bad-ink);
+      }
+
+      .section-head {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        margin-bottom: 14px;
+      }
+
+      .history-toolbar {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 12px;
+        margin-bottom: 14px;
+      }
+
+      .history-toolbar-actions {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: flex-end;
+        gap: 10px;
+      }
+
+      .value-block {
+        padding: 14px;
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        background: var(--surface);
+      }
+
+      .value-label {
+        display: block;
+        margin-bottom: 8px;
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+
+      .big-number {
+        font-size: clamp(32px, 4vw, 48px);
+        font-weight: 800;
+        line-height: 1;
+      }
+
+      .mini-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+        gap: 12px;
+      }
+
+      .table-wrap {
+        overflow-x: auto;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+
+      th,
+      td {
+        padding: 13px 12px;
+        border-bottom: 1px solid var(--border);
+        text-align: left;
+        vertical-align: top;
+      }
+
+      th {
+        font-size: 12px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+
+      .history-total-column {
+        background: rgba(156, 71, 41, 0.08);
+        color: var(--accent-dark);
+      }
+
+      .history-total-column.subtle {
+        font-weight: 700;
+      }
+
+      .history-total-column.value-cell {
+        font-weight: 700;
+      }
+
+      tbody tr:last-child td {
+        border-bottom: none;
+      }
+
+      .table-link {
+        color: var(--accent-dark);
+        text-decoration: none;
+        word-break: break-all;
+      }
+
+      .table-link:hover {
+        text-decoration: underline;
+      }
+
+      .empty-state {
+        padding: 18px;
+        border: 1px dashed var(--border);
+        border-radius: 16px;
+        background: rgba(255, 255, 255, 0.65);
+        color: var(--muted);
+      }
+
+      .mono {
+        font-family: Consolas, "Courier New", monospace;
+      }
+
+      [hidden] {
+        display: none !important;
+      }
+
+      .detection-groups > * + * {
+        margin-top: 18px;
+      }
+
+      .summary-card {
+        border-color: rgba(138, 74, 43, 0.28);
+      }
+
+      .summary-figures {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+        gap: 14px;
+        margin-bottom: 12px;
+      }
+
+      .summary-figure {
+        padding: 16px 18px;
+        border: 1px solid var(--border);
+        border-radius: 18px;
+        background: var(--surface);
+      }
+
+      .summary-figure[data-kind="total"] {
+        background: rgba(138, 74, 43, 0.08);
+        border-color: rgba(138, 74, 43, 0.3);
+      }
+
+      .summary-number {
+        font-size: clamp(30px, 4vw, 44px);
+        font-weight: 800;
+        line-height: 1.05;
+      }
+
+      .monitor-card .section-head {
+        align-items: flex-start;
+        margin-bottom: 10px;
+      }
+
+      .monitor-title {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        min-width: 0;
+      }
+
+      .monitor-slot {
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+
+      .monitor-name {
+        font-size: 19px;
+        font-weight: 800;
+        line-height: 1.2;
+        word-break: break-word;
+      }
+
+      .monitor-url {
+        display: block;
+        margin-bottom: 14px;
+        font-size: 12px;
+        color: var(--muted);
+        word-break: break-all;
+      }
+
+      .monitor-headline {
+        padding: 16px 18px;
+        border: 1px solid rgba(138, 74, 43, 0.3);
+        border-radius: 18px;
+        background: rgba(138, 74, 43, 0.08);
+      }
+
+      .monitor-headline .summary-number {
+        font-size: clamp(34px, 5vw, 52px);
+      }
+
+      .monitor-shifts {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 12px;
+      }
+
+      .shift-chip {
+        flex: 1 1 90px;
+        padding: 8px 12px;
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        background: var(--surface);
+        font-size: 13px;
+        color: var(--muted);
+      }
+
+      .shift-chip b {
+        display: block;
+        margin-top: 2px;
+        font-size: 20px;
+        color: var(--ink);
+      }
+
+      .monitor-facts {
+        margin-top: 12px;
+        display: grid;
+        gap: 4px;
+        font-size: 13px;
+        color: var(--muted);
+      }
+
+      .monitor-facts span b {
+        color: var(--ink);
+        font-weight: 700;
+      }
+
+      .monitor-note {
+        margin-top: 10px;
+        padding: 10px 12px;
+        border-radius: 12px;
+        background: rgba(0, 0, 0, 0.035);
+        font-size: 13px;
+      }
+
+      .monitor-empty {
+        padding: 22px 18px;
+        border: 1px dashed var(--border);
+        border-radius: 18px;
+        color: var(--muted);
+        text-align: center;
+      }
+
+      .live-dot {
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        margin-right: 6px;
+        border-radius: 50%;
+        background: currentColor;
+        vertical-align: middle;
+      }
+
+      .pill[data-state="ok"] .live-dot {
+        animation: live-pulse 1.6s ease-in-out infinite;
+      }
+
+      @keyframes live-pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.25; }
+      }
+
+      .setup-details {
+        margin-bottom: 16px;
+        border: 1px solid var(--border);
+        border-radius: 22px;
+        background: var(--card);
+        overflow: hidden;
+      }
+
+      .setup-summary {
+        padding: 16px 20px;
+        font-weight: 800;
+        cursor: pointer;
+        list-style: none;
+      }
+
+      .setup-summary::-webkit-details-marker {
+        display: none;
+      }
+
+      .setup-summary::before {
+        content: "+";
+        display: inline-block;
+        width: 20px;
+        font-weight: 700;
+        color: var(--accent);
+      }
+
+      .setup-details[open] .setup-summary::before {
+        content: "\2212";
+      }
+
+      .setup-details .card {
+        border: 0;
+        border-radius: 0;
+        background: transparent;
+      }
+
+      .setup-hint {
+        display: block;
+        margin-top: 2px;
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--muted);
+      }
+
+      .setup-details .card + .card {
+        border-top: 1px solid var(--border);
+      }
+
+      #detectionsPanel .history-toolbar {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: flex-end;
+        gap: 12px;
+      }
+
+      #detectionsPanel .history-toolbar .field {
+        flex: 1 1 180px;
+        min-width: 165px;
+      }
+
+      #detectionsPanel .history-toolbar-actions {
+        flex: 0 0 auto;
+        margin-left: auto;
+      }
+
+      .detection-day {
+        border: 1px solid var(--border);
+        border-radius: 18px;
+        background: var(--surface);
+        overflow: hidden;
+      }
+
+      .detection-day-head {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 14px 18px;
+        border-bottom: 1px solid var(--border);
+        background: rgba(255, 255, 255, 0.55);
+      }
+
+      .detection-day-title {
+        font-size: 17px;
+        font-weight: 800;
+      }
+
+      .detection-day-meta {
+        font-size: 13px;
+        color: var(--muted);
+      }
+
+      .detection-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+        gap: 14px;
+        padding: 16px 18px 18px;
+      }
+
+      .detection-card {
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        overflow: hidden;
+        background: #fff;
+      }
+
+      .detection-card img {
+        display: block;
+        width: 100%;
+        height: auto;
+        cursor: zoom-in;
+        background: #e9e6e1;
+      }
+
+      .detection-card-body {
+        padding: 10px 12px;
+      }
+
+      .detection-time {
+        font-size: 18px;
+        font-weight: 800;
+        font-family: Consolas, "Courier New", monospace;
+      }
+
+      .detection-meta {
+        margin-top: 4px;
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      .shift-tag {
+        display: inline-block;
+        margin-left: 8px;
+        padding: 2px 8px;
+        border-radius: 999px;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        vertical-align: middle;
+      }
+
+      .shift-tag[data-shift="day"] {
+        background: rgba(212, 160, 23, 0.18);
+        color: #8a6508;
+      }
+
+      .shift-tag[data-shift="night"] {
+        background: rgba(43, 74, 138, 0.15);
+        color: #2b4a8a;
+      }
+
+      @media (max-width: 720px) {
+        .hero,
+        .card {
+          padding: 16px;
+        }
+
+        th,
+        td {
+          padding-inline: 10px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <h1>Система подсчёта мешков с содой</h1>
+      </section>
+
+      <div class="tabs">
+        <button id="rtspTabButton" class="tab-button active" type="button">RTSP-поток</button>
+        <button id="detectionsTabButton" class="tab-button" type="button">Кадры с разметкой</button>
+      </div>
+
+      <section id="rtspPanel" class="tab-panel active">
+        <details id="streamSetup" class="setup-details">
+          <summary class="setup-summary">Управление RTSP-потоками<span class="setup-hint">список потоков, запуск анализа, добавление</span></summary>
+        <article id="rtspStreamsCard" class="card">
+          <div class="section-head">
+            <h2>История загрузок RTSP-потоков</h2>
+            <span class="pill">Название, ссылка, дата</span>
+          </div>
+          <div id="rtspHistoryEmpty" class="empty-state">
+            Пока нет ни одной записи. Добавьте RTSP-поток через форму ниже.
+          </div>
+          <div id="rtspHistoryTableWrap" class="table-wrap" hidden>
+            <table>
+              <thead>
+                <tr>
+                  <th>Название</th>
+                  <th>Ссылка</th>
+                  <th>Дата</th>
+                  <th>Действия</th>
+                </tr>
+              </thead>
+              <tbody id="rtspHistoryBody"></tbody>
+            </table>
+          </div>
+        </article>
+          <article class="card">
+            <h2>Добавить RTSP-потоки</h2>
+            <form id="rtspForm" class="stack">
+              <label class="field">
+                <span class="field-label">Название RTSP-потока</span>
+                <input
+                  id="rtspNameInput"
+                  type="text"
+                  maxlength="120"
+                  placeholder="Например, Цех по загрузке реагентов"
+                />
+              </label>
+              <label class="field">
+                <span class="field-label">RTSP-ссылка</span>
+                <input
+                  id="rtspUrlInput"
+                  type="url"
+                  placeholder="rtsp://camera.example.com/live"
+                />
+              </label>
+              <div class="actions">
+                <button id="addRtspButton" class="primary" type="submit">Добавить RTSP-поток</button>
+                <button id="refreshRtspButton" class="secondary" type="button">Обновить историю</button>
+              </div>
+              <div id="rtspMessage" class="message"></div>
+              <p class="hint">
+                История хранится на backend и показывает последние добавленные RTSP-потоки с датой.
+              </p>
+            </form>
+          </article>
+        </details>
+
+        <article id="shiftSummary" class="card summary-card">
+          <div class="section-head">
+            <h2>Итог за сменовый день</h2>
+            <span id="summaryActivePill" class="pill" data-state="warn">Нет активных потоков</span>
+          </div>
+          <div class="summary-figures">
+            <div class="summary-figure" data-kind="day">
+              <span class="value-label">Дневная смена</span>
+              <div id="summaryDayCount" class="summary-number">0</div>
+            </div>
+            <div class="summary-figure" data-kind="night">
+              <span class="value-label">Ночная смена</span>
+              <div id="summaryNightCount" class="summary-number">0</div>
+            </div>
+            <div class="summary-figure" data-kind="total">
+              <span class="value-label">Всего за день</span>
+              <div id="summaryTotalCount" class="summary-number">0</div>
+            </div>
+          </div>
+          <p class="hint">
+            Сменовый день: <span id="summaryBusinessDate" class="mono">-</span>.
+            Дневная смена 07:00-19:00, ночная 19:00-07:00.
+          </p>
+        </article>
+
+        <div class="grid two" style="margin-top: 16px;">
+          <article class="card">
+            <div class="section-head">
+              <h2>Текущий статус RTSP-потока</h2>
+              <span id="monitorStatePill" class="pill" data-state="warn">Ожидание</span>
+            </div>
+            <div class="stack">
+              <div class="value-block">
+                <span class="value-label">RTSP-поток</span>
+                <div id="monitorCurrentStreamName">Мониторинг ещё не запущен</div>
+              </div>
+              <div class="value-block">
+                <span class="value-label">Ссылка</span>
+                <div id="monitorCurrentStreamUrl" class="mono">-</div>
+              </div>
+              <div class="mini-grid">
+                <div class="value-block">
+                  <span class="value-label">Количество мешков</span>
+                  <div id="monitorCurrentBagCount" class="big-number">-</div>
+                </div>
+                <div class="value-block">
+                  <span class="value-label">Обработано кадров</span>
+                  <div id="monitorFramesProcessed">-</div>
+                </div>
+                <div class="value-block">
+                  <span class="value-label">Запущен</span>
+                  <div id="monitorStartedAt">-</div>
+                </div>
+                <div class="value-block">
+                  <span class="value-label">Последнее обновление</span>
+                  <div id="monitorLastUpdate">-</div>
+                </div>
+              </div>
+              <div class="value-block">
+                <span class="value-label">Состояние аналитики</span>
+                <div id="monitorDetails">Запустите анализ из действий в истории RTSP-потоков.</div>
+              </div>
+              <div class="mini-grid">
+                <div class="value-block">
+                  <span class="value-label">За текущий день, дневная смена</span>
+                  <div id="monitorDayCount" class="big-number">0</div>
+                </div>
+                <div class="value-block">
+                  <span class="value-label">За текущий день, ночная смена</span>
+                  <div id="monitorNightCount" class="big-number">0</div>
+                </div>
+                <div class="value-block">
+                  <span class="value-label">За текущий день, всего</span>
+                  <div id="monitorTotalCount" class="big-number">0</div>
+                </div>
+                <div class="value-block">
+                  <span class="value-label">Дата сменового дня</span>
+                  <div id="monitorBusinessDate">-</div>
+                </div>
+              </div>
+              <p id="shiftScheduleHint" class="hint">
+                Смены считаются по времени площадки: дневная 07:00-19:00, ночная 19:00-07:00.
+              </p>
+            </div>
+          </article>
+        </div>
+
+        <article class="card" style="margin-top: 16px;">
+          <div class="section-head">
+            <h2>История мешков по сменам</h2>
+          </div>
+          <div class="history-toolbar">
+            <label class="field">
+              <span class="field-label">РЎ РґР°С‚С‹</span>
+              <input id="shiftDateFromInput" type="date" />
+            </label>
+            <label class="field">
+              <span class="field-label">РџРѕ РґР°С‚Сѓ</span>
+              <input id="shiftDateToInput" type="date" />
+            </label>
+            <div class="history-toolbar-actions">
+              <button id="applyShiftHistoryFilterButton" class="secondary" type="button">РџРѕРєР°Р·Р°С‚СЊ</button>
+              <button id="exportShiftHistoryButton" class="primary" type="button">Р’С‹РіСЂСѓР·РёС‚СЊ Excel</button>
+            </div>
+          </div>
+          <div id="shiftHistoryMessage" class="message"></div>
+          <div id="shiftHistoryEmpty" class="empty-state">
+            История по сменам появится после запуска анализа RTSP-потока из истории.
+          </div>
+          <div id="shiftHistoryTableWrap" class="table-wrap" hidden>
+            <table>
+              <thead>
+                <tr>
+                  <th>Дата</th>
+                  <th>RTSP-поток</th>
+                  <th>Дневная смена</th>
+                  <th>Ночная смена</th>
+                  <th>Всего</th>
+                </tr>
+              </thead>
+              <tbody id="shiftHistoryBody"></tbody>
+            </table>
+          </div>
+        </article>
+
+
+      </section>
+
+      <section id="detectionsPanel" class="tab-panel">
+        <article class="card">
+          <div class="section-head">
+            <h2>Кадры с разметкой</h2>
+            <span class="hint">Кадры, на которых модель нашла мешки</span>
+          </div>
+          <p class="hint">
+            Каждый раз, когда модель засчитывает мешок в живом RTSP-потоке, она сохраняет кадр с
+            отмеченной зоной над бункером. Кадры сгруппированы по датам и времени, поэтому по ним
+            удобно проверять, что именно посчитала нейросеть.
+          </p>
+          <div class="history-toolbar">
+            <label class="field">
+              <span class="field-label">Дата с</span>
+              <input id="detectionsDateFrom" type="date" />
+            </label>
+            <label class="field">
+              <span class="field-label">Дата по</span>
+              <input id="detectionsDateTo" type="date" />
+            </label>
+            <label class="field">
+              <span class="field-label">RTSP-поток</span>
+              <select id="detectionsStreamFilter">
+                <option value="">Все потоки</option>
+              </select>
+            </label>
+            <div class="history-toolbar-actions">
+              <button id="detectionsApplyButton" class="primary" type="button">Показать</button>
+              <button id="detectionsRefreshButton" class="secondary" type="button">Обновить</button>
+              <button id="detectionsClearButton" class="secondary" type="button">Очистить архив</button>
+            </div>
+          </div>
+          <p id="detectionsMessage" class="message"></p>
+          <div class="mini-grid">
+            <div class="value-block">
+              <span class="value-label">Кадров найдено</span>
+              <div id="detectionsTotal" class="big-number">-</div>
+            </div>
+            <div class="value-block">
+              <span class="value-label">Дней в выборке</span>
+              <div id="detectionsDays">-</div>
+            </div>
+            <div class="value-block">
+              <span class="value-label">Срок хранения</span>
+              <div id="detectionsRetention">-</div>
+            </div>
+          </div>
+        </article>
+
+        <p id="detectionsEmpty" class="empty-state">
+          Пока нет ни одного кадра. Запустите мониторинг RTSP-потока — кадры появятся здесь, как
+          только модель засчитает первый мешок.
+        </p>
+        <div id="detectionsGroups" class="detection-groups" hidden></div>
+      </section>
+    </main>
+
+    <script>
+      const rtspTabButton = document.getElementById("rtspTabButton");
+      const rtspPanel = document.getElementById("rtspPanel");
+
+      const rtspForm = document.getElementById("rtspForm");
+      const rtspNameInput = document.getElementById("rtspNameInput");
+      const rtspUrlInput = document.getElementById("rtspUrlInput");
+      const addRtspButton = document.getElementById("addRtspButton");
+      const refreshRtspButton = document.getElementById("refreshRtspButton");
+      const rtspMessage = document.getElementById("rtspMessage");
+      const rtspHistoryEmpty = document.getElementById("rtspHistoryEmpty");
+      const rtspHistoryTableWrap = document.getElementById("rtspHistoryTableWrap");
+      const rtspHistoryBody = document.getElementById("rtspHistoryBody");
+      const shiftScheduleHint = document.getElementById("shiftScheduleHint");
+      const monitorStatePill = document.getElementById("monitorStatePill");
+      const monitorCurrentStreamName = document.getElementById("monitorCurrentStreamName");
+      const monitorCurrentStreamUrl = document.getElementById("monitorCurrentStreamUrl");
+      const monitorCurrentBagCount = document.getElementById("monitorCurrentBagCount");
+      const monitorFramesProcessed = document.getElementById("monitorFramesProcessed");
+      const monitorStartedAt = document.getElementById("monitorStartedAt");
+      const monitorLastUpdate = document.getElementById("monitorLastUpdate");
+      const monitorDetails = document.getElementById("monitorDetails");
+      const monitorDayCount = document.getElementById("monitorDayCount");
+      const monitorNightCount = document.getElementById("monitorNightCount");
+      const monitorTotalCount = document.getElementById("monitorTotalCount");
+      const monitorBusinessDate = document.getElementById("monitorBusinessDate");
+      const shiftDateFromInput = document.getElementById("shiftDateFromInput");
+      const shiftDateToInput = document.getElementById("shiftDateToInput");
+      const applyShiftHistoryFilterButton = document.getElementById("applyShiftHistoryFilterButton");
+      const exportShiftHistoryButton = document.getElementById("exportShiftHistoryButton");
+      const shiftHistoryMessage = document.getElementById("shiftHistoryMessage");
+      const shiftHistoryEmpty = document.getElementById("shiftHistoryEmpty");
+      const shiftHistoryTableWrap = document.getElementById("shiftHistoryTableWrap");
+      const shiftHistoryBody = document.getElementById("shiftHistoryBody");
+
+      let rtspStreams = [];
+      let monitorStatusPayload = null;
+      let shiftHistoryItems = [];
+      let editingShiftDate = "";
+
+      function activateTab() {
+        rtspTabButton.classList.add("active");
+        rtspPanel.classList.add("active");
+      }
+
+      function escapeHtml(value) {
+        return String(value ?? "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#39;");
+      }
+
+      function formatDateTime(value) {
+        if (!value) {
+          return "-";
+        }
+
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime())) {
+          return value;
+        }
+
+        return date.toLocaleString("ru-RU");
+      }
+
+      function setMessage(element, text, tone = "") {
+        element.textContent = text || "";
+        element.className = "message";
+        if (tone) {
+          element.classList.add(tone);
+        }
+      }
+
+      function toIsoDate(value) {
+        if (!(value instanceof Date) || Number.isNaN(value.getTime())) {
+          return "";
+        }
+
+        const adjustedDate = new Date(value.getTime() - value.getTimezoneOffset() * 60_000);
+        return adjustedDate.toISOString().slice(0, 10);
+      }
+
+      function initializeShiftHistoryFilters() {
+        const now = new Date();
+        shiftDateToInput.value = toIsoDate(now);
+        shiftDateFromInput.value = toIsoDate(new Date(now.getFullYear(), now.getMonth(), 1));
+      }
+
+      function getShiftHistoryFilters() {
+        return {
+          dateFrom: shiftDateFromInput.value || "",
+          dateTo: shiftDateToInput.value || "",
+        };
+      }
+
+      function validateShiftHistoryFilters() {
+        const { dateFrom, dateTo } = getShiftHistoryFilters();
+        if (dateFrom && dateTo && dateFrom > dateTo) {
+          throw new Error("Дата начала периода не может быть позже даты окончания.");
+        }
+        return { dateFrom, dateTo };
+      }
+
+      function buildShiftHistoryParams() {
+        const { dateFrom, dateTo } = validateShiftHistoryFilters();
+        const params = new URLSearchParams({ limit: "90" });
+        if (dateFrom) {
+          params.set("date_from", dateFrom);
+        }
+        if (dateTo) {
+          params.set("date_to", dateTo);
+        }
+
+        return params;
+      }
+
+      async function fetchJson(url, options = {}) {
+        const response = await fetch(url, options);
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(data.detail || data.message || "Ошибка запроса.");
+        }
+        return data;
+      }
+
+      function renderShiftSchedule(schedule) {
+        if (!schedule) {
+          shiftScheduleHint.textContent =
+            "Смены считаются по времени площадки: дневная 07:00-19:00, ночная 19:00-07:00.";
+          return;
+        }
+
+        shiftScheduleHint.textContent =
+          `Смены считаются по времени ${schedule.timezone}: ` +
+          `${schedule.day_shift?.label || "Дневная"} ${schedule.day_shift?.hours || "07:00-19:00"}, ` +
+          `${schedule.night_shift?.label || "Ночная"} ${schedule.night_shift?.hours || "19:00-07:00"}.`;
+      }
+
+      function renderRtspHistory(items) {
+        const hasItems = Array.isArray(items) && items.length > 0;
+        rtspHistoryEmpty.hidden = hasItems;
+        rtspHistoryTableWrap.hidden = !hasItems;
+
+        if (!hasItems) {
+          rtspHistoryBody.innerHTML = "";
+          return;
+        }
+
+        rtspHistoryBody.innerHTML = items
+          .map(
+            (item) => `
+              <tr>
+                <td>${escapeHtml(item.name || "-")}</td>
+                <td>
+                  <a class="table-link mono" href="${escapeHtml(item.url || "#")}" target="_blank" rel="noreferrer">
+                    ${escapeHtml(item.url || "-")}
+                  </a>
+                </td>
+                <td>${escapeHtml(formatDateTime(item.created_at))}</td>
+                <td>
+                  <div class="actions">
+                    <button class="secondary" type="button" data-action="analyze" data-stream-id="${escapeHtml(item.id || "")}">Анализировать</button>
+                    <button class="secondary" type="button" data-action="delete" data-stream-id="${escapeHtml(item.id || "")}">Удалить</button>
+                  </div>
+                </td>
+              </tr>
+            `
+          )
+          .join("");
+      }
+
+      async function loadRtspHistory() {
+        const data = await fetchJson("/api/rtsp-streams");
+        rtspStreams = data.items || [];
+        renderRtspHistory(rtspStreams);
+        return rtspStreams;
+      }
+
+      function resolveMonitorPill(payload) {
+        const analytics = payload?.analytics || {};
+        if (!payload?.active) {
+          return { text: "Остановлен", tone: "warn" };
+        }
+        if (analytics.state === "running") {
+          return { text: "Считает мешки", tone: "ok" };
+        }
+        if (analytics.state === "waiting") {
+          return { text: "Ожидание потока", tone: "warn" };
+        }
+        if (analytics.state === "error") {
+          return { text: "Ошибка", tone: "bad" };
+        }
+        if (analytics.state === "done") {
+          return { text: "Готово", tone: "ok" };
+        }
+        return { text: "Ожидание", tone: "warn" };
+      }
+
+      function renderMonitorStatus(payload) {
+        monitorStatusPayload = payload || null;
+
+        const analytics = payload?.analytics || {};
+        const activeStream = payload?.stream || null;
+        const todaySummary = payload?.today_summary || {};
+        const pill = resolveMonitorPill(payload);
+
+        monitorStatePill.textContent = pill.text;
+        monitorStatePill.dataset.state = pill.tone;
+        monitorCurrentStreamName.textContent = activeStream?.name || "Мониторинг ещё не запущен";
+        monitorCurrentStreamUrl.innerHTML = activeStream?.url
+          ? `<a class="table-link mono" href="${escapeHtml(activeStream.url)}" target="_blank" rel="noreferrer">${escapeHtml(activeStream.url)}</a>`
+          : "-";
+        monitorCurrentBagCount.textContent = Number.isInteger(analytics.bag_count) ? String(analytics.bag_count) : "-";
+        monitorFramesProcessed.textContent = Number.isInteger(analytics.frames_processed) ? String(analytics.frames_processed) : "-";
+        monitorStartedAt.textContent = formatDateTime(payload?.started_at);
+        monitorLastUpdate.textContent = formatDateTime(analytics.last_result_at);
+        monitorDetails.textContent =
+          analytics.message ||
+          analytics.last_error ||
+          (payload?.active
+            ? "Мониторинг запущен, ожидаются данные от RTSP-потока."
+            : "Запустите анализ из действий в истории RTSP-потоков.");
+        monitorDayCount.textContent = String(todaySummary.day_count ?? 0);
+        monitorNightCount.textContent = String(todaySummary.night_count ?? 0);
+        monitorTotalCount.textContent = String(todaySummary.total_count ?? 0);
+        monitorBusinessDate.textContent = todaySummary.date || "-";
+
+        renderShiftSchedule(payload?.shift_schedule || null);
+      }
+
+function renderShiftHistory(items) {
+        const hasItems = Array.isArray(items) && items.length > 0;
+        shiftHistoryEmpty.hidden = hasItems;
+        shiftHistoryTableWrap.hidden = !hasItems;
+
+        if (!hasItems) {
+          shiftHistoryItems = [];
+          shiftHistoryBody.innerHTML = "";
+          return;
+        }
+
+        shiftHistoryItems = [...items];
+        shiftHistoryBody.innerHTML = items
+          .map(
+            (item) => `
+              <tr>
+                <td>${escapeHtml(item.date || "-")}</td>
+                <td>${
+                  editingShiftDate === item.date
+                    ? `<input type="number" min="0" step="1" data-field="day_count" value="${escapeHtml(String(item.day_count ?? 0))}" />`
+                    : escapeHtml(String(item.day_count ?? 0))
+                }</td>
+                <td>${
+                  editingShiftDate === item.date
+                    ? `<input type="number" min="0" step="1" data-field="night_count" value="${escapeHtml(String(item.night_count ?? 0))}" />`
+                    : escapeHtml(String(item.night_count ?? 0))
+                }</td>
+                <td>${escapeHtml(String(item.total_count ?? 0))}</td>
+                <td>
+                  <div class="actions">
+                    ${
+                      editingShiftDate === item.date
+                        ? `<button class="secondary" type="button" data-action="save-row" data-date="${escapeHtml(item.date || "")}">Сохранить</button>
+                           <button class="secondary" type="button" data-action="cancel-row" data-date="${escapeHtml(item.date || "")}">Отмена</button>`
+                        : `<button class="secondary" type="button" data-action="edit-row" data-date="${escapeHtml(item.date || "")}">Редактировать</button>
+                           <button class="secondary" type="button" data-action="delete-row" data-date="${escapeHtml(item.date || "")}">Удалить</button>`
+                    }
+                  </div>
+                </td>
+              </tr>
+            `
+          )
+          .join("");
+      }
+
+      async function refreshMonitorStatus(options = {}) {
+        const { quiet = false } = options;
+        try {
+          const data = await fetchJson("/api/rtsp-monitor/status");
+          renderMonitorStatus(data);
+          return data;
+        } catch (error) {
+          if (!quiet) {
+            setMessage(rtspMessage, error.message, "error");
+          }
+          throw error;
+        }
+      }
+
+      async function refreshShiftHistory(options = {}) {
+        const { quiet = false } = options;
+
+        try {
+          const params = buildShiftHistoryParams();
+          const data = await fetchJson(`/api/rtsp-monitor/history?${params.toString()}`);
+          if (editingShiftDate && !(data.items || []).some((item) => item.date === editingShiftDate)) {
+            editingShiftDate = "";
+          }
+          renderShiftHistory(data.items || []);
+          renderShiftSchedule(data.shift_schedule || null);
+          return data;
+        } catch (error) {
+          if (!quiet) {
+            setMessage(shiftHistoryMessage, error.message, "error");
+          }
+          throw error;
+        }
+      }
+
+      async function exportShiftHistory() {
+        const params = buildShiftHistoryParams();
+        params.delete("limit");
+
+        const response = await fetch(`/api/rtsp-monitor/history/export?${params.toString()}`);
+        if (!response.ok) {
+          const data = await response.json().catch(() => ({}));
+          throw new Error(data.detail || data.message || "РћС€РёР±РєР° РІС‹РіСЂСѓР·РєРё.");
+        }
+
+        const blob = await response.blob();
+        const contentDisposition = response.headers.get("Content-Disposition") || "";
+        const filenameMatch = contentDisposition.match(/filename=\"?([^\";]+)\"?/i);
+        const filename = filenameMatch?.[1] || "bag_shift_history.xlsx";
+        const downloadUrl = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = downloadUrl;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(downloadUrl);
+        return filename;
+      }
+
+      async function updateShiftHistoryRow(date, dayCount, nightCount) {
+        return fetchJson(`/api/rtsp-monitor/history/${encodeURIComponent(date)}`, {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            day_count: Math.max(Number(dayCount) || 0, 0),
+            night_count: Math.max(Number(nightCount) || 0, 0),
+          }),
+        });
+      }
+
+      async function deleteShiftHistoryRow(date) {
+        return fetchJson(`/api/rtsp-monitor/history/${encodeURIComponent(date)}`, {
+          method: "DELETE",
+        });
+      }
+
+      async function startMonitorForStream(streamId) {
+        const data = await fetchJson("/api/rtsp-monitor/start", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ stream_id: streamId }),
+        });
+        renderMonitorStatus(data);
+        await refreshShiftHistory({ quiet: true });
+        return data;
+      }
+
+      rtspForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+
+        const payload = {
+          name: rtspNameInput.value.trim(),
+          url: rtspUrlInput.value.trim(),
+        };
+
+        if (!payload.name || !payload.url) {
+          setMessage(rtspMessage, "Заполни название потока и RTSP-ссылку.", "error");
+          return;
+        }
+
+        addRtspButton.disabled = true;
+        setMessage(rtspMessage, "Добавляю RTSP-поток...", "warn");
+
+        try {
+          const data = await fetchJson("/api/rtsp-streams", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify(payload),
+          });
+          rtspStreams = data.items || [];
+          renderRtspHistory(rtspStreams);
+          await refreshShiftHistory({ quiet: true });
+          setMessage(rtspMessage, data.message || "RTSP-поток добавлен.", "ok");
+          rtspNameInput.value = "";
+          rtspUrlInput.value = "";
+        } catch (error) {
+          setMessage(rtspMessage, error.message, "error");
+        } finally {
+          addRtspButton.disabled = false;
+        }
+      });
+
+      refreshRtspButton.addEventListener("click", async () => {
+        refreshRtspButton.disabled = true;
+        setMessage(rtspMessage, "Обновляю реестр RTSP-потоков...", "warn");
+        try {
+          await loadRtspHistory();
+          await refreshShiftHistory({ quiet: true });
+          setMessage(rtspMessage, "Реестр RTSP-потоков обновлён.", "ok");
+        } catch (error) {
+          setMessage(rtspMessage, error.message, "error");
+        } finally {
+          refreshRtspButton.disabled = false;
+        }
+      });
+
+      rtspHistoryBody.addEventListener("click", async (event) => {
+        const button = event.target.closest("button[data-action][data-stream-id]");
+        if (!button) {
+          return;
+        }
+
+        const streamId = button.dataset.streamId;
+        const action = button.dataset.action;
+        if (!streamId || !action) {
+          return;
+        }
+
+        if (action === "analyze") {
+          button.disabled = true;
+          setMessage(rtspMessage, "Запускаю анализ выбранного RTSP-потока...", "warn");
+
+          try {
+            const data = await startMonitorForStream(streamId);
+            setMessage(rtspMessage, data.message || "Анализ RTSP-потока запущен.", "ok");
+          } catch (error) {
+            setMessage(rtspMessage, error.message, "error");
+          } finally {
+            button.disabled = false;
+          }
+          return;
+        }
+
+        if (action === "delete") {
+          button.disabled = true;
+          setMessage(rtspMessage, "Удаляю RTSP-поток из истории...", "warn");
+
+          try {
+            const data = await fetchJson(`/api/rtsp-streams/${encodeURIComponent(streamId)}`, {
+              method: "DELETE",
+            });
+            rtspStreams = data.items || [];
+            renderRtspHistory(rtspStreams);
+            await refreshMonitorStatus({ quiet: true });
+            await refreshShiftHistory({ quiet: true });
+            setMessage(rtspMessage, data.message || "RTSP-поток удалён.", "ok");
+          } catch (error) {
+            setMessage(rtspMessage, error.message, "error");
+          } finally {
+            button.disabled = false;
+          }
+        }
+      });
+
+      shiftHistoryBody.addEventListener("click", async (event) => {
+        const button = event.target.closest("button[data-action][data-date]");
+        if (!button) {
+          return;
+        }
+
+        const bucketDate = button.dataset.date || "";
+        const action = button.dataset.action || "";
+        if (!bucketDate || !action) {
+          return;
+        }
+
+        if (action === "edit-row") {
+          editingShiftDate = bucketDate;
+          renderShiftHistory(shiftHistoryItems);
+          return;
+        }
+
+        if (action === "cancel-row") {
+          editingShiftDate = "";
+          renderShiftHistory(shiftHistoryItems);
+          return;
+        }
+
+        if (action === "save-row") {
+          const row = button.closest("tr");
+          const dayInput = row?.querySelector('input[data-field="day_count"]');
+          const nightInput = row?.querySelector('input[data-field="night_count"]');
+          if (!(dayInput instanceof HTMLInputElement) || !(nightInput instanceof HTMLInputElement)) {
+            setMessage(shiftHistoryMessage, "Не удалось прочитать значения строки.", "error");
+            return;
+          }
+
+          button.disabled = true;
+          setMessage(shiftHistoryMessage, `Сохраняю строку за ${bucketDate}...`, "warn");
+          try {
+            const data = await updateShiftHistoryRow(bucketDate, dayInput.value, nightInput.value);
+            editingShiftDate = "";
+            await refreshShiftHistory({ quiet: true });
+            await refreshMonitorStatus({ quiet: true });
+            setMessage(shiftHistoryMessage, data.message || `Строка за ${bucketDate} обновлена.`, "ok");
+          } catch (error) {
+            setMessage(shiftHistoryMessage, error.message, "error");
+          } finally {
+            button.disabled = false;
+          }
+          return;
+        }
+
+        if (action === "delete-row") {
+          button.disabled = true;
+          setMessage(shiftHistoryMessage, `Удаляю строку за ${bucketDate}...`, "warn");
+          try {
+            const data = await deleteShiftHistoryRow(bucketDate);
+            if (editingShiftDate === bucketDate) {
+              editingShiftDate = "";
+            }
+            await refreshShiftHistory({ quiet: true });
+            await refreshMonitorStatus({ quiet: true });
+            setMessage(shiftHistoryMessage, data.message || `Строка за ${bucketDate} удалена.`, "ok");
+          } catch (error) {
+            setMessage(shiftHistoryMessage, error.message, "error");
+          } finally {
+            button.disabled = false;
+          }
+        }
+      });
+
+      applyShiftHistoryFilterButton.addEventListener("click", async () => {
+        applyShiftHistoryFilterButton.disabled = true;
+        setMessage(shiftHistoryMessage, "РћР±РЅРѕРІР»СЏСЋ РёСЃС‚РѕСЂРёСЋ РїРѕ РІС‹Р±СЂР°РЅРЅРѕРјСѓ РїРµСЂРёРѕРґСѓ...", "warn");
+        try {
+          await refreshShiftHistory({ quiet: true });
+          setMessage(shiftHistoryMessage, "РСЃС‚РѕСЂРёСЏ РїРѕ РІС‹Р±СЂР°РЅРЅРѕРјСѓ РїРµСЂРёРѕРґСѓ РѕР±РЅРѕРІР»РµРЅР°.", "ok");
+        } catch (error) {
+          setMessage(shiftHistoryMessage, error.message, "error");
+        } finally {
+          applyShiftHistoryFilterButton.disabled = false;
+        }
+      });
+
+      exportShiftHistoryButton.addEventListener("click", async () => {
+        exportShiftHistoryButton.disabled = true;
+        setMessage(shiftHistoryMessage, "Р“РѕС‚РѕРІР»СЋ Excel-С„Р°Р№Р» СЃ РёСЃС‚РѕСЂРёРµР№...", "warn");
+        try {
+          const filename = await exportShiftHistory();
+          setMessage(shiftHistoryMessage, `Р¤Р°Р№Р» ${filename} РіРѕС‚РѕРІ Рє СЃРєР°С‡РёРІР°РЅРёСЋ.`, "ok");
+        } catch (error) {
+          setMessage(shiftHistoryMessage, error.message, "error");
+        } finally {
+          exportShiftHistoryButton.disabled = false;
+        }
+      });
+
+      function validateShiftHistoryFilters() {
+        const { dateFrom, dateTo } = getShiftHistoryFilters();
+        if (dateFrom && dateTo && dateFrom > dateTo) {
+          throw new Error("\u0414\u0430\u0442\u0430 \u043d\u0430\u0447\u0430\u043b\u0430 \u043f\u0435\u0440\u0438\u043e\u0434\u0430 \u043d\u0435 \u043c\u043e\u0436\u0435\u0442 \u0431\u044b\u0442\u044c \u043f\u043e\u0437\u0436\u0435 \u0434\u0430\u0442\u044b \u043e\u043a\u043e\u043d\u0447\u0430\u043d\u0438\u044f.");
+        }
+        return { dateFrom, dateTo };
+      }
+
+      async function exportShiftHistory() {
+        const params = buildShiftHistoryParams();
+        params.delete("limit");
+
+        const response = await fetch(`/api/rtsp-monitor/history/export?${params.toString()}`);
+        if (!response.ok) {
+          const data = await response.json().catch(() => ({}));
+          throw new Error(data.detail || data.message || "\u041e\u0448\u0438\u0431\u043a\u0430 \u0432\u044b\u0433\u0440\u0443\u0437\u043a\u0438.");
+        }
+
+        const blob = await response.blob();
+        const contentDisposition = response.headers.get("Content-Disposition") || "";
+        const filenameMatch = contentDisposition.match(/filename=\"?([^\";]+)\"?/i);
+        const filename = filenameMatch?.[1] || "bag_shift_history.xlsx";
+        const downloadUrl = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = downloadUrl;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(downloadUrl);
+        return filename;
+      }
+
+      function attachShiftHistoryControls() {
+        const fromLabel = shiftDateFromInput?.closest("label")?.querySelector(".field-label");
+        const toLabel = shiftDateToInput?.closest("label")?.querySelector(".field-label");
+        const shiftHistoryHeadRow = document.querySelector("#shiftHistoryTableWrap thead tr");
+        if (fromLabel) {
+          fromLabel.textContent = "\u0421 \u0434\u0430\u0442\u044b";
+        }
+        if (toLabel) {
+          toLabel.textContent = "\u0414\u043e \u0434\u0430\u0442\u044b";
+        }
+        if (shiftHistoryHeadRow) {
+          shiftHistoryHeadRow.innerHTML = `
+            <th>Дата</th>
+            <th>Дневная смена</th>
+            <th>Ночная смена</th>
+            <th>Всего</th>
+            <th>Действия</th>
+          `;
+        }
+
+        const currentApplyButton = document.getElementById("applyShiftHistoryFilterButton");
+        const currentExportButton = document.getElementById("exportShiftHistoryButton");
+        if (!currentApplyButton || !currentExportButton) {
+          return;
+        }
+
+        const applyButton = currentApplyButton.cloneNode(true);
+        const exportButton = currentExportButton.cloneNode(true);
+        applyButton.textContent = "\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u044c";
+        exportButton.textContent = "\u0412\u044b\u0433\u0440\u0443\u0437\u0438\u0442\u044c Excel";
+
+        currentApplyButton.replaceWith(applyButton);
+        currentExportButton.replaceWith(exportButton);
+
+        applyButton.addEventListener("click", async () => {
+          applyButton.disabled = true;
+          setMessage(shiftHistoryMessage, "\u041e\u0431\u043d\u043e\u0432\u043b\u044f\u044e \u0438\u0441\u0442\u043e\u0440\u0438\u044e \u043f\u043e \u0432\u044b\u0431\u0440\u0430\u043d\u043d\u043e\u043c\u0443 \u043f\u0435\u0440\u0438\u043e\u0434\u0443...", "warn");
+          try {
+            await refreshShiftHistory({ quiet: true });
+            setMessage(shiftHistoryMessage, "\u0418\u0441\u0442\u043e\u0440\u0438\u044f \u043f\u043e \u0432\u044b\u0431\u0440\u0430\u043d\u043d\u043e\u043c\u0443 \u043f\u0435\u0440\u0438\u043e\u0434\u0443 \u043e\u0431\u043d\u043e\u0432\u043b\u0435\u043d\u0430.", "ok");
+          } catch (error) {
+            setMessage(shiftHistoryMessage, error.message, "error");
+          } finally {
+            applyButton.disabled = false;
+          }
+        });
+
+        exportButton.addEventListener("click", async () => {
+          exportButton.disabled = true;
+          setMessage(shiftHistoryMessage, "\u0413\u043e\u0442\u043e\u0432\u043b\u044e Excel-\u0444\u0430\u0439\u043b \u0441 \u0438\u0441\u0442\u043e\u0440\u0438\u0435\u0439...", "warn");
+          try {
+            const filename = await exportShiftHistory();
+            setMessage(shiftHistoryMessage, `\u0424\u0430\u0439\u043b ${filename} \u0433\u043e\u0442\u043e\u0432 \u043a \u0441\u043a\u0430\u0447\u0438\u0432\u0430\u043d\u0438\u044e.`, "ok");
+          } catch (error) {
+            setMessage(shiftHistoryMessage, error.message, "error");
+          } finally {
+            exportButton.disabled = false;
+          }
+        });
+      }
+
+      rtspTabButton.addEventListener("click", () => activateTab());
+
+      activateTab();
+      initializeShiftHistoryFilters();
+      attachShiftHistoryControls();
+      (async () => {
+        try {
+          await loadRtspHistory();
+          await refreshMonitorStatus({ quiet: true });
+          await refreshShiftHistory({ quiet: true });
+        } catch (error) {
+          setMessage(rtspMessage, error.message, "error");
+        }
+      })();
+
+      setInterval(() => {
+        refreshMonitorStatus({ quiet: true }).catch(() => {});
+        refreshShiftHistory({ quiet: true }).catch(() => {});
+      }, 5000);
+    </script>
+    <script src="/rtsp-dual.js"></script>
+    <script src="/detections.js"></script>
+  </body>
+</html>
