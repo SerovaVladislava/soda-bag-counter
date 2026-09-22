@@ -47,6 +47,22 @@ MAX_SHIFT_HISTORY_EXPORT_ROWS = 5000
 DEMO_SHIFT_HISTORY_DAYS = 30
 MIN_DEMO_SHIFT_HISTORY_ROWS = 60
 RTSP_MONITOR_LIMIT = 2
+# Видео в каталоге загрузок определяется по расширению, а не по списку
+# исключений: денylist уже трижды принимал за видео служебные файлы
+# (индекс кадров, .gitkeep), и публикация падала.
+VIDEO_SUFFIXES = {
+    ".mp4",
+    ".avi",
+    ".mkv",
+    ".mov",
+    ".m4v",
+    ".webm",
+    ".mpg",
+    ".mpeg",
+    ".ts",
+    ".flv",
+    ".wmv",
+}
 MAX_DETECTION_FRAMES = 3000
 DETECTION_RETENTION_DAYS = 30
 DEFAULT_DETECTION_LIMIT = 300
@@ -433,14 +449,7 @@ class StreamManager:
             [
                 candidate
                 for candidate in UPLOAD_DIR.iterdir()
-                if candidate.is_file()
-                and candidate.name
-                not in {
-                    FFMPEG_LOG_PATH.name,
-                    RTSP_HISTORY_PATH.name,
-                    SHIFT_HISTORY_PATH.name,
-                    DETECTION_INDEX_PATH.name,
-                }
+                if candidate.is_file() and candidate.suffix.lower() in VIDEO_SUFFIXES
             ],
             key=lambda candidate: candidate.stat().st_mtime,
             reverse=True,
@@ -458,12 +467,7 @@ class StreamManager:
         with self.lock:
             self._sync_process_state_locked()
             for candidate in UPLOAD_DIR.iterdir():
-                if candidate.is_file() and candidate.name not in {
-                    FFMPEG_LOG_PATH.name,
-                    RTSP_HISTORY_PATH.name,
-                    SHIFT_HISTORY_PATH.name,
-                    DETECTION_INDEX_PATH.name,
-                }:
+                if candidate.is_file() and candidate.suffix.lower() in VIDEO_SUFFIXES:
                     candidate.unlink(missing_ok=True)
             self.current_file = None
             self.last_error = None
