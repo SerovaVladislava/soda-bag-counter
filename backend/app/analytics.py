@@ -23,12 +23,15 @@ BAG_LABEL_HINTS = {"bag", "bags", "sack", "sacks"}
 # между пробами: если картинка перестала меняться, это не отсутствие мешков,
 # а мёртвый источник, и об этом надо сказать вслух.
 STALL_SIGNATURE_SIZE = 32
-# Замерший источник отдаёт тот же кадр, различие слепков ровно 0.00. На живых
-# записях (40 мин, четыре файла) самая спокойная пара соседних проб отличается
-# на 0.337, пятый процентиль - 0.68. Порог 0.15 вдвое ниже самого спокойного
-# живого кадра, поэтому ложная тревога на тихой сцене исключена.
-STALL_DIFF_THRESHOLD = 0.15
+# Решение принимается по МЕДИАНЕ различий за окно, а не по отдельной пробе.
+# Измерено на настоящем RTSP: застывшая картинка даёт медиану 0.004, живая
+# сцена - 0.778, разрыв в двести раз. Но отдельные пробы разделить нельзя:
+# у застывшего потока бывают всплески до 3.5 из-за битых макроблоков при
+# потере пакетов, и они перекрывают весь диапазон живой сцены. Медиана к
+# таким выбросам невосприимчива.
+STALL_DIFF_THRESHOLD = 0.1
 STALL_SECONDS = 90.0
+STALL_MIN_SAMPLES = 10
 
 DETECTION_CAPTURE_WIDTH = 1280
 DETECTION_CAPTURE_JPEG_QUALITY = 80
@@ -863,7 +866,7 @@ class BagAnalyticsManager:
             fps_window_started = time.monotonic()
             fps_window_frames = 0
             previous_signature = None
-            last_motion_t = time.monotonic()
+            motion_history: deque[tuple[float, float]] = deque()
             stalled = False
 
             while not stop_event.is_set():
@@ -967,13 +970,18 @@ class BagAnalyticsManager:
 
                 signature = _frame_signature(frame)
                 if previous_signature is not None:
-                    moved = float(np.abs(signature - previous_signature).mean())
-                    if moved >= STALL_DIFF_THRESHOLD:
-                        last_motion_t = timestamp
+                    motion_history.append(
+                        (timestamp, float(np.abs(signature - previous_signature).mean()))
+                    )
+                    while motion_history and timestamp - motion_history[0][0] > self.stall_seconds:
+                        motion_history.popleft()
                 previous_signature = signature
                 stalled = (
                     self.stall_seconds > 0.0
-                    and timestamp - last_motion_t >= self.stall_seconds
+                    and len(motion_history) >= STALL_MIN_SAMPLES
+                    and timestamp - motion_history[0][0] >= self.stall_seconds * 0.8
+                    and float(np.median([value for _, value in motion_history]))
+                    < STALL_DIFF_THRESHOLD
                 )
 
                 with self.lock:
@@ -982,7 +990,7 @@ class BagAnalyticsManager:
 
                     self.state = "stalled" if stalled else "running"
                     self.message = self._build_stall_message(
-                        seconds=timestamp - last_motion_t,
+                        seconds=(timestamp - motion_history[0][0]) if motion_history else 0.0,
                         final_count=int(counter.count),
                     ) if stalled else self._build_live_message(
                         final_count=int(counter.count),
