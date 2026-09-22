@@ -59,6 +59,13 @@ ZONE_GRAY_LEVEL = 140
 ZONE_SATURATION_MAX = 60
 ZONE_FILL_ENTER = 0.21
 ZONE_FILL_STAY = 0.17
+# Верхняя граница: мешок, висящий над бункером, закрывает зону не более чем на
+# 0.735 - измерено по 1203 пробам за 40 минут записей, выше 0.80 нет ни одной.
+# Зона видна под фиксированным углом, и мешок на расстоянии бункера в неё просто
+# не помещается целиком. Заполнение под единицу означает объект вплотную к
+# объективу - это кран несёт мешок мимо, а не выгрузка. На площадке заказчика
+# такой случай дал ровно 1.000.
+ZONE_FILL_MAX = 0.85
 ZONE_CONTROL_RATIO = 3.0
 ZONE_BASELINE_WINDOW = 300
 ZONE_BASELINE_PERCENTILE = 20.0
@@ -232,6 +239,7 @@ class HopperZoneEpisodeCounter:
         saturation_max: int = ZONE_SATURATION_MAX,
         fill_enter: float = ZONE_FILL_ENTER,
         fill_stay: float = ZONE_FILL_STAY,
+        fill_max: float = ZONE_FILL_MAX,
         control_ratio: float = ZONE_CONTROL_RATIO,
         baseline_window: int = ZONE_BASELINE_WINDOW,
         baseline_percentile: float = ZONE_BASELINE_PERCENTILE,
@@ -254,6 +262,7 @@ class HopperZoneEpisodeCounter:
         self.saturation_max = int(saturation_max)
         self.fill_enter = float(fill_enter)
         self.fill_stay = min(float(fill_stay), float(fill_enter))
+        self.fill_max = float(fill_max)
         self.control_ratio = max(float(control_ratio), 0.0)
         self.baseline_percentile = float(baseline_percentile)
         self.baseline_min_samples = max(int(baseline_min_samples), 1)
@@ -378,6 +387,10 @@ class HopperZoneEpisodeCounter:
         present = fill >= threshold
         if present and self.control_ratio > 0.0:
             present = fill >= self.control_ratio * max(control_fill, 1e-6)
+        # Зона закрыта почти целиком - объект вплотную к объективу, а не над
+        # бункером: кран несёт мешок мимо камеры.
+        if present and 0.0 < self.fill_max < 1.0:
+            present = fill <= self.fill_max
 
         self._update_stuck_suppression(fill=fill, timestamp=timestamp)
         commit_allowed = (not self._suppressed_until_clear) and fill >= baseline + self.baseline_margin
@@ -555,6 +568,7 @@ class BagAnalyticsManager:
         zone_saturation_max: int = ZONE_SATURATION_MAX,
         zone_fill_enter: float = ZONE_FILL_ENTER,
         zone_fill_stay: float = ZONE_FILL_STAY,
+        zone_fill_max: float = ZONE_FILL_MAX,
         zone_control_ratio: float = ZONE_CONTROL_RATIO,
         zone_baseline_window: int = ZONE_BASELINE_WINDOW,
         zone_baseline_percentile: float = ZONE_BASELINE_PERCENTILE,
@@ -617,6 +631,7 @@ class BagAnalyticsManager:
         self.zone_saturation_max = int(zone_saturation_max)
         self.zone_fill_enter = float(zone_fill_enter)
         self.zone_fill_stay = min(float(zone_fill_stay), float(zone_fill_enter))
+        self.zone_fill_max = float(zone_fill_max)
         self.zone_control_ratio = max(float(zone_control_ratio), 0.0)
         self.zone_baseline_window = max(int(zone_baseline_window), 1)
         self.zone_baseline_percentile = float(zone_baseline_percentile)
@@ -1227,6 +1242,7 @@ class BagAnalyticsManager:
             saturation_max=self.zone_saturation_max,
             fill_enter=self.zone_fill_enter,
             fill_stay=self.zone_fill_stay,
+            fill_max=self.zone_fill_max,
             control_ratio=self.zone_control_ratio,
             baseline_window=self.zone_baseline_window,
             baseline_percentile=self.zone_baseline_percentile,
