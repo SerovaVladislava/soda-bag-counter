@@ -42,6 +42,15 @@
    Должно напечатать `20.0`. Если печатает `3.5` — файл не подхватился,
    проверьте, что `analytics.py` лежит рядом с `docker-compose.yml`.
 
+   Заодно проверьте, что поток не замер:
+
+   ```bash
+   docker compose exec backend python -c "from app.analytics import STALL_SECONDS; print(STALL_SECONDS)"
+   ```
+
+   Должно напечатать `90.0` — столько секунд неподвижной картинки система
+   считает признаком зависшего источника и сообщает об этом в интерфейсе.
+
 ## Как откатиться
 
 Удалите `docker-compose.override.yml` и `analytics.py`, затем `docker compose up -d`.

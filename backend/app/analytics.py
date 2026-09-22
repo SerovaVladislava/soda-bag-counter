@@ -18,6 +18,18 @@ BAG_LABEL_HINTS = {"bag", "bags", "sack", "sacks"}
 
 # Live detection captures: one annotated still per counted bag, downscaled so a
 # long-running archive stays a manageable size on disk.
+# Замерший поток неотличим от пустой зоны: аналитика продолжает исправно
+# брать пробы и честно сообщать, что мешка нет. Поэтому кадры сравниваются
+# между пробами: если картинка перестала меняться, это не отсутствие мешков,
+# а мёртвый источник, и об этом надо сказать вслух.
+STALL_SIGNATURE_SIZE = 32
+# Замерший источник отдаёт тот же кадр, различие слепков ровно 0.00. На живых
+# записях (40 мин, четыре файла) самая спокойная пара соседних проб отличается
+# на 0.337, пятый процентиль - 0.68. Порог 0.15 вдвое ниже самого спокойного
+# живого кадра, поэтому ложная тревога на тихой сцене исключена.
+STALL_DIFF_THRESHOLD = 0.15
+STALL_SECONDS = 90.0
+
 DETECTION_CAPTURE_WIDTH = 1280
 DETECTION_CAPTURE_JPEG_QUALITY = 80
 
@@ -153,6 +165,16 @@ class ZoneObservation:
     committed: bool
     state: str
     candidate: BagCandidate | None
+
+
+def _frame_signature(frame: Any) -> Any:
+    """Маленький слепок кадра: хватает, чтобы отличить движение от заморозки."""
+    small = cv2.resize(
+        frame,
+        (STALL_SIGNATURE_SIZE, STALL_SIGNATURE_SIZE),
+        interpolation=cv2.INTER_AREA,
+    )
+    return cv2.cvtColor(small, cv2.COLOR_BGR2GRAY).astype(np.float32)
 
 
 @dataclass(frozen=True)
@@ -545,6 +567,7 @@ class BagAnalyticsManager:
         zone_stuck_clear_seconds: float = ZONE_STUCK_CLEAR_SECONDS,
         zone_max_tracked_episodes: int = ZONE_MAX_TRACKED_EPISODES,
 
+        stall_seconds: float = STALL_SECONDS,
         detection_sink: Callable[[DetectionCapture], None] | None = None,
         detection_capture_width: int = DETECTION_CAPTURE_WIDTH,
         detection_jpeg_quality: int = DETECTION_CAPTURE_JPEG_QUALITY,        fps_fallback: float = 15.0,
@@ -626,10 +649,12 @@ class BagAnalyticsManager:
         self.active_sample_period_seconds = self.zone_sample_period_seconds
         self.fps_effective: float | None = None
         self.fps_source: str | None = None
+        self.stream_stalled = False
         self.last_zone_fill: float | None = None
         self.last_zone_baseline: float | None = None
         self.episode_state = "idle"
 
+        self.stall_seconds = max(float(stall_seconds), 0.0)
         self.detection_sink = detection_sink
         self.detection_capture_width = max(int(detection_capture_width), 320)
         self.detection_jpeg_quality = min(max(int(detection_jpeg_quality), 40), 95)
@@ -699,6 +724,7 @@ class BagAnalyticsManager:
             self.active_sample_period_seconds = self.zone_sample_period_seconds
             self.fps_effective = None
             self.fps_source = None
+            self.stream_stalled = False
             self.last_zone_fill = None
             self.last_zone_baseline = None
             self.episode_state = "idle"
@@ -747,6 +773,7 @@ class BagAnalyticsManager:
                 self.active_sample_period_seconds = self.zone_sample_period_seconds
                 self.fps_effective = None
                 self.fps_source = None
+                self.stream_stalled = False
                 self.last_zone_fill = None
                 self.last_zone_baseline = None
                 self.episode_state = "idle"
@@ -835,6 +862,9 @@ class BagAnalyticsManager:
             headroom_since: float | None = None
             fps_window_started = time.monotonic()
             fps_window_frames = 0
+            previous_signature = None
+            last_motion_t = time.monotonic()
+            stalled = False
 
             while not stop_event.is_set():
                 is_sample = stream_frame_index % frame_stride == 0
@@ -935,12 +965,26 @@ class BagAnalyticsManager:
                 sample_counts = recent_presence.copy()
                 support_frames = sum(sample_counts)
 
+                signature = _frame_signature(frame)
+                if previous_signature is not None:
+                    moved = float(np.abs(signature - previous_signature).mean())
+                    if moved >= STALL_DIFF_THRESHOLD:
+                        last_motion_t = timestamp
+                previous_signature = signature
+                stalled = (
+                    self.stall_seconds > 0.0
+                    and timestamp - last_motion_t >= self.stall_seconds
+                )
+
                 with self.lock:
                     if run_id != self.run_id:
                         return
 
-                    self.state = "running"
-                    self.message = self._build_live_message(
+                    self.state = "stalled" if stalled else "running"
+                    self.message = self._build_stall_message(
+                        seconds=timestamp - last_motion_t,
+                        final_count=int(counter.count),
+                    ) if stalled else self._build_live_message(
                         final_count=int(counter.count),
                         support_frames=support_frames,
                         sampled_frames=len(sample_counts),
@@ -948,6 +992,7 @@ class BagAnalyticsManager:
                         pending_hits=int(counter.pending_hits),
                         degraded=bool(counter.degraded),
                     )
+                    self.stream_stalled = bool(stalled)
                     self.bag_count = int(counter.count)
                     self.max_bag_count = int(counter.count)
                     self.frames_processed = sampled_frame_index
@@ -1473,6 +1518,13 @@ class BagAnalyticsManager:
             sample_counts = [int(item.count) for item in sorted_evidence]
 
         return int(final_count), int(max_count), sample_counts, int(support_frames)
+
+    def _build_stall_message(self, seconds: float, final_count: int) -> str:
+        return (
+            f"Картинка в RTSP-потоке не меняется уже {int(seconds)} с - похоже, источник "
+            f"завис или отдаёт застывший кадр. Подсчёт приостановлен, учтено {final_count} "
+            "мешк(ов). Проверьте камеру и сеть."
+        )
 
     def _build_live_message(
         self,
@@ -3058,6 +3110,7 @@ class BagAnalyticsManager:
             ),
             "fps_source": self.fps_source,
             "episode_state": self.episode_state,
+            "stream_stalled": self.stream_stalled,
             "zone_fill": (
                 round(float(self.last_zone_fill), 4) if self.last_zone_fill is not None else None
             ),

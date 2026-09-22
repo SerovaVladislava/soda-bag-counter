@@ -50,6 +50,16 @@ RTSP_MONITOR_LIMIT = 2
 # Видео в каталоге загрузок определяется по расширению, а не по списку
 # исключений: денylist уже трижды принимал за видео служебные файлы
 # (индекс кадров, .gitkeep), и публикация падала.
+# Контейнер может врать о частоте кадров: записи с этой камеры заявляют
+# 60 fps при реальных 15. С -re ffmpeg разгоняется по заявленной частоте,
+# перекодирует впятеро больше кадров, чем нужно, забивает процессор и в
+# итоге падает с Conversion failed. Поэтому частота измеряется по таймлайну
+# контейнера и передаётся ffmpeg явно.
+FPS_PROBE_FRAMES = 300
+FPS_PROBE_MIN = 1.0
+FPS_PROBE_MAX = 120.0
+FPS_PROBE_MISMATCH = 1.25
+
 VIDEO_SUFFIXES = {
     ".mp4",
     ".avi",
@@ -116,6 +126,46 @@ def build_shift_schedule_payload() -> dict[str, Any]:
             "hours": "19:00-07:00",
         },
     }
+
+
+def probe_real_fps(path: Path) -> float | None:
+    """Реальная частота кадров по таймлайну контейнера.
+
+    Возвращает None, если измерить не удалось или результат неправдоподобен —
+    тогда публикация идёт как раньше, по заявленной частоте.
+    """
+    try:
+        import cv2
+    except Exception:
+        return None
+
+    capture = None
+    try:
+        capture = cv2.VideoCapture(str(path))
+        if not capture.isOpened():
+            return None
+        if not capture.grab():
+            return None
+        started_ms = capture.get(cv2.CAP_PROP_POS_MSEC)
+        grabbed = 0
+        for _ in range(FPS_PROBE_FRAMES):
+            if not capture.grab():
+                break
+            grabbed += 1
+        if grabbed < 30:
+            return None
+        elapsed = (capture.get(cv2.CAP_PROP_POS_MSEC) - started_ms) / 1000.0
+        if elapsed <= 0:
+            return None
+        fps = grabbed / elapsed
+        if not (FPS_PROBE_MIN <= fps <= FPS_PROBE_MAX):
+            return None
+        return round(fps, 3)
+    except Exception:
+        return None
+    finally:
+        if capture is not None:
+            capture.release()
 
 
 def is_valid_rtsp_url(value: str) -> bool:
@@ -500,6 +550,23 @@ class StreamManager:
             FFMPEG_LOG_PATH.write_text("", encoding="utf-8")
             self.log_handle = FFMPEG_LOG_PATH.open("a", encoding="utf-8")
 
+            input_options: list[str] = []
+            declared_fps = 0.0
+            real_fps = probe_real_fps(self.current_file)
+            if real_fps is not None:
+                try:
+                    import cv2
+
+                    probe = cv2.VideoCapture(str(self.current_file))
+                    declared_fps = float(probe.get(cv2.CAP_PROP_FPS) or 0.0)
+                    probe.release()
+                except Exception:
+                    declared_fps = 0.0
+                # Переопределяем только при заметном расхождении: если контейнер
+                # не врёт, вмешиваться незачем.
+                if declared_fps <= 0 or declared_fps / real_fps >= FPS_PROBE_MISMATCH:
+                    input_options = ["-r", str(real_fps)]
+
             command = [
                 "ffmpeg",
                 "-hide_banner",
@@ -509,6 +576,7 @@ class StreamManager:
                 "-re",
                 "-stream_loop",
                 "-1",
+                *input_options,
                 "-i",
                 str(self.current_file),
                 "-map",
