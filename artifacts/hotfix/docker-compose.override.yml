@@ -1,0 +1,17 @@
+# Быстрая доставка правки без перезаливки образа.
+#
+# Compose подхватывает этот файл автоматически, если он лежит рядом с
+# docker-compose.yml. Он подменяет один файл внутри контейнера свежей версией
+# с диска — образ пересобирать не нужно.
+#
+# Как применить:
+#   1. Положите рядом с docker-compose.yml два файла: этот и analytics.py
+#   2. docker compose up -d
+#
+# Как откатиться: удалите оба файла и выполните docker compose up -d
+
+services:
+  backend:
+    volumes:
+      - ./data/uploads:/app/uploads
+      - ./analytics.py:/app/app/analytics.py:ro

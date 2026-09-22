@@ -18,6 +18,8 @@ backups/
 artifacts/*.tar
 artifacts/*.tar.gz
 artifacts/data/
+# подменяемый файл качается из backend/app, дубликат в истории не нужен
+artifacts/hotfix/analytics.py
 
 # локальные настройки инструментов разработчика
 .claude/

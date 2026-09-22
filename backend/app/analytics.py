@@ -53,11 +53,18 @@ ZONE_MIN_PRESENT_HITS = 2
 # A commit needs BOTH a minimum number of samples and a minimum amount of
 # WALL-CLOCK presence.  The sample count alone is meaningless: the sampling
 # interval is derived from a measured frame rate that can be wrong in either
-# direction, and two samples can span 0.13 s or 8 s.  Measured on input.avi the
-# longest bag-free disturbance (steam/dust over an empty hopper) that clears
-# fill_enter together with the control-zone gate lasts 0.60 s (1.86 s with the
-# control gate disabled), while a real unloading occupies the zone for 50-130 s.
-ZONE_MIN_PRESENT_SECONDS = 3.5
+# direction, and two samples can span 0.13 s or 8 s.
+#
+# The threshold is what separates an unloading from a bag merely being carried
+# past the camera.  The zone is flat, so a bag swinging a metre from the lens
+# covers it exactly like a bag hanging over the hopper ten metres away - there
+# is no depth to tell them apart.  Duration does tell them apart: measured over
+# four recordings (40 min, 06-08 Sep) a crane moving bags to the floor occupies
+# the zone for 4 s, while the eight real unloadings occupy it for 90-224 s.
+# Every value from 10 s to 60 s yields the same eight episodes, so 20 s sits in
+# the middle of a wide plateau: five times the transit, four times below the
+# shortest real unloading.
+ZONE_MIN_PRESENT_SECONDS = 20.0
 ZONE_ABSENCE_SECONDS = 20.0
 ZONE_SAMPLE_PERIOD_SECONDS = 2.0
 ZONE_MAX_SAMPLE_PERIOD_SECONDS = 5.0
