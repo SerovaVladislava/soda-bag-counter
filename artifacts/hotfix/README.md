@@ -32,8 +32,12 @@
 3. Проверьте, что правка на месте:
 
    ```bash
-   docker exec rtsp-backend python -c "from app.analytics import ZONE_MIN_PRESENT_SECONDS; print(ZONE_MIN_PRESENT_SECONDS)"
+   docker compose exec backend python -c "from app.analytics import ZONE_MIN_PRESENT_SECONDS; print(ZONE_MIN_PRESENT_SECONDS)"
    ```
+
+   Команда обращается к сервису, а не к имени контейнера, поэтому работает и
+   на старой установке (контейнер `rtsp-backend`), и на новой, где Compose
+   именует контейнеры по проекту (`rtsp-bag-counter-backend-1`).
 
    Должно напечатать `20.0`. Если печатает `3.5` — файл не подхватился,
    проверьте, что `analytics.py` лежит рядом с `docker-compose.yml`.
