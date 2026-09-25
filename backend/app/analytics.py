@@ -3284,6 +3284,19 @@ class BagAnalyticsManager:
             "commit_suppressed": self.commit_suppressed,
             "pending_hits": self.pending_hits,
             "pending_seconds": self.pending_seconds,
+            # Пороги РАБОТАЮЩЕГО процесса: после подмены файла без перезапуска
+            # docker compose exec покажет новый файл, а сервер продолжит жить
+            # старым кодом - здесь видно, что исполняется на самом деле.
+            "thresholds": {
+                "min_present_seconds": float(getattr(self, "zone_min_present_seconds", ZONE_MIN_PRESENT_SECONDS)),
+                "pending_gap_seconds": float(ZONE_PENDING_GAP_SECONDS),
+                "fill_enter": float(getattr(self, "zone_fill_enter", ZONE_FILL_ENTER)),
+                "fill_stay": float(getattr(self, "zone_fill_stay", ZONE_FILL_STAY)),
+                "fill_max": float(getattr(self, "zone_fill_max", ZONE_FILL_MAX)),
+                "absence_seconds": float(getattr(self, "zone_absence_seconds", ZONE_ABSENCE_SECONDS)),
+                "stuck_max_suppress_seconds": float(ZONE_STUCK_MAX_SUPPRESS_SECONDS),
+                "stall_seconds": float(getattr(self, "stall_seconds", STALL_SECONDS)),
+            },
             "zone_fill": (
                 round(float(self.last_zone_fill), 4) if self.last_zone_fill is not None else None
             ),

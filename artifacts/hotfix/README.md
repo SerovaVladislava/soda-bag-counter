@@ -29,18 +29,28 @@
    Compose подхватит `docker-compose.override.yml` автоматически — указывать
    его в команде не нужно.
 
-3. Проверьте, что правка на месте:
+   **Если override уже стоял и вы только обновили `analytics.py`**, этой
+   команды недостаточно: конфигурация не изменилась, Compose ответит
+   `Running` и не тронет контейнер, а сервер продолжит работать старым
+   кодом из памяти. Перезапустите backend явно:
 
    ```bash
-   docker compose exec backend python -c "from app.analytics import ZONE_MIN_PRESENT_SECONDS; print(ZONE_MIN_PRESENT_SECONDS)"
+   docker compose restart backend
    ```
 
-   Команда обращается к сервису, а не к имени контейнера, поэтому работает и
-   на старой установке (контейнер `rtsp-backend`), и на новой, где Compose
-   именует контейнеры по проекту (`rtsp-bag-counter-backend-1`).
+3. Проверьте, что правку исполняет **запущенный сервер**, а не просто файл на
+   диске. `docker compose exec ... python -c` для этого не годится: он
+   поднимает отдельный интерпретатор и всегда покажет файл с диска. Спросите
+   сам сервер:
 
-   Должно напечатать `10.0`. Если печатает `3.5` — файл не подхватился,
-   проверьте, что `analytics.py` лежит рядом с `docker-compose.yml`.
+   ```bash
+   curl http://localhost:18000/api/rtsp-monitor/status
+   ```
+
+   В ответе у активного монитора есть блок `"thresholds"`. Ожидается
+   `"min_present_seconds": 10.0` и `"stuck_max_suppress_seconds": 300.0`.
+   Если блока `thresholds` нет вообще — сервер всё ещё на старом коде,
+   выполните `docker compose restart backend`.
 
 4. После `docker compose up -d` контейнер пересоздаётся, и мониторинг
    останавливается — он не восстанавливается сам. Откройте интерфейс,
