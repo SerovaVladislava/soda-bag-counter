@@ -33,6 +33,13 @@ STALL_DIFF_THRESHOLD = 0.1
 STALL_SECONDS = 90.0
 STALL_MIN_SAMPLES = 10
 
+# Журнал проб для калибровки на месте: время, заполнение, контроль, база,
+# решение. Пишется только если каталог существует (в контейнере это том с
+# данными), ограничен по размеру и никогда не мешает подсчёту.
+SAMPLE_LOG_DIR = os.environ.get("BAG_SAMPLE_LOG_DIR", "/app/uploads")
+SAMPLE_LOG_NAME = "zone_samples.csv"
+SAMPLE_LOG_MAX_BYTES = 25 * 1024 * 1024
+
 DETECTION_CAPTURE_WIDTH = 1280
 DETECTION_CAPTURE_JPEG_QUALITY = 80
 
@@ -86,13 +93,24 @@ ZONE_MIN_PRESENT_HITS = 2
 # Every value from 10 s to 60 s yields the same eight episodes, so 20 s sits in
 # the middle of a wide plateau: five times the transit, four times below the
 # shortest real unloading.
-ZONE_MIN_PRESENT_SECONDS = 20.0
+ZONE_MIN_PRESENT_SECONDS = 10.0
+# Провалы внутри накопления: одна проба под порогом больше не обнуляет
+# таймер. Мешок, опущенный в бункер, виден верхней зоне неровно - макушка
+# то входит в кадр, то выходит. Накопление сбрасывается только если зона
+# пуста дольше этого срока подряд, а к засчёту требуется, чтобы за время
+# накопления мешок был виден хотя бы на половине проб.
+ZONE_PENDING_GAP_SECONDS = 8.0
+ZONE_PENDING_MIN_FRACTION = 0.5
 ZONE_ABSENCE_SECONDS = 20.0
 ZONE_SAMPLE_PERIOD_SECONDS = 2.0
 ZONE_MAX_SAMPLE_PERIOD_SECONDS = 5.0
 ZONE_MAX_COMMITS_PER_HOUR = 30
 ZONE_MAX_EPISODE_SECONDS = 1800.0
 ZONE_STUCK_CLEAR_SECONDS = 60.0
+# Замок после застрявшего эпизода снимается либо минутой чистой зоны, либо по
+# истечении этого срока - иначе при дневном свете, когда пустая зона держит
+# 0.17-0.20 часами, счёт останавливался бы навсегда и молча.
+ZONE_STUCK_MAX_SUPPRESS_SECONDS = 300.0
 ZONE_MAX_TRACKED_EPISODES = 512
 ZONE_PENDING_GAP_FACTOR = 2.5
 ZONE_RATE_WINDOW_SECONDS = 3600.0
@@ -247,6 +265,9 @@ class HopperZoneEpisodeCounter:
         baseline_margin: float = ZONE_BASELINE_MARGIN,
         min_present_hits: int = ZONE_MIN_PRESENT_HITS,
         min_present_seconds: float = ZONE_MIN_PRESENT_SECONDS,
+        pending_gap_seconds: float = ZONE_PENDING_GAP_SECONDS,
+        pending_min_fraction: float = ZONE_PENDING_MIN_FRACTION,
+        stuck_max_suppress_seconds: float = ZONE_STUCK_MAX_SUPPRESS_SECONDS,
         absence_seconds: float = ZONE_ABSENCE_SECONDS,
         sample_period_seconds: float = ZONE_SAMPLE_PERIOD_SECONDS,
         max_commits_per_hour: int = ZONE_MAX_COMMITS_PER_HOUR,
@@ -274,6 +295,9 @@ class HopperZoneEpisodeCounter:
         self.max_commits_per_hour = max(int(max_commits_per_hour), 1)
         self.max_episode_seconds = max(float(max_episode_seconds), 0.0)
         self.stuck_clear_seconds = max(float(stuck_clear_seconds), 0.0)
+        self.pending_gap_seconds = max(float(pending_gap_seconds), 0.0)
+        self.pending_min_fraction = min(max(float(pending_min_fraction), 0.0), 1.0)
+        self.stuck_max_suppress_seconds = max(float(stuck_max_suppress_seconds), 0.0)
         self.max_tracked_episodes = max(int(max_tracked_episodes), 1)
         self.spacing_min_samples = max(int(spacing_min_samples), 1)
 
@@ -296,8 +320,21 @@ class HopperZoneEpisodeCounter:
         self._episode_start_t = 0.0
         self._suppressed_until_clear = False
         self._clear_since: float | None = None
+        self._suppressed_since: float | None = None
+        self._pending_present = 0
+        self._pending_total = 0
         self._gaps: deque[float] = deque(maxlen=max(int(spacing_window), 1))
         self._last_sample_t: float | None = None
+
+    @property
+    def commit_suppressed(self) -> bool:
+        return bool(self._suppressed_until_clear)
+
+    @property
+    def pending_seconds(self) -> float:
+        if self._first_present_t is None or self._prev_present_t is None:
+            return 0.0
+        return float(self._prev_present_t - self._first_present_t)
 
     @property
     def episodes(self) -> list[dict[str, Any]]:
@@ -376,7 +413,12 @@ class HopperZoneEpisodeCounter:
             else 0.0
         )
 
-        self._fills.append(fill)
+        # Базовая линия описывает ПУСТУЮ зону, поэтому во время эпизода пробы в
+        # неё не попадают: иначе за долгую выгрузку окно наполняется значениями
+        # самого мешка, порог удержания уползает вверх, обвисший мешок выпадает
+        # из присутствия и один эпизод засчитывается дважды.
+        if self.state != "active":
+            self._fills.append(fill)
         baseline = (
             float(np.percentile(np.asarray(self._fills, dtype=np.float32), self.baseline_percentile))
             if len(self._fills) >= self.baseline_min_samples
@@ -384,6 +426,12 @@ class HopperZoneEpisodeCounter:
         )
 
         threshold = self.fill_stay if self.state == "active" else self.fill_enter
+        # Пороги отсчитываются от уровня пустой зоны: ночью он около 0.08 и
+        # пороги 0.21/0.17 работают как есть, но днём пустая зона держит 0.18 -
+        # тогда абсолютный порог удержания не даёт эпизоду закрыться, и он
+        # упирается в 30-минутный замок. Базовая линия появляется после
+        # baseline_min_samples проб, до этого поправка равна нулю.
+        threshold = max(threshold, baseline + self.baseline_margin)
         present = fill >= threshold
         if present and self.control_ratio > 0.0:
             present = fill >= self.control_ratio * max(control_fill, 1e-6)
@@ -407,31 +455,47 @@ class HopperZoneEpisodeCounter:
                     self._close_episode()
                     self._suppressed_until_clear = True
                     self._clear_since = None
-        elif present and commit_allowed:
-            gap_limit = ZONE_PENDING_GAP_FACTOR * self.effective_sample_period_seconds
+                    self._suppressed_since = timestamp
+        elif present:
+            # Разрыв между пробами с мешком: не одна проба, а срок. Гейт базовой
+            # линии накопление не сбрасывает - он лишь откладывает сам засчёт.
+            gap_limit = max(
+                ZONE_PENDING_GAP_FACTOR * self.effective_sample_period_seconds,
+                self.pending_gap_seconds,
+            )
             if (
                 self._prev_present_t is not None
                 and timestamp - self._prev_present_t > gap_limit
             ):
-                self.pending_hits = 0
-                self._first_present_t = None
+                self._reset_pending()
             if self._first_present_t is None:
                 self._first_present_t = timestamp
             self.pending_hits += 1
+            self._pending_present += 1
+            self._pending_total += 1
             self._prev_present_t = timestamp
             # Two conditions, and the seconds one is what actually rejects
             # steam: however dense or sparse the sampling turns out to be, the
             # zone must stay occupied for min_present_seconds of real time.
             present_span = timestamp - self._first_present_t
+            fraction = self._pending_present / max(self._pending_total, 1)
             if (
-                self.pending_hits >= self.min_present_hits
+                commit_allowed
+                and self.pending_hits >= self.min_present_hits
                 and present_span >= self.min_present_seconds
+                and fraction >= self.pending_min_fraction
             ):
                 committed = self._commit(frame_position=frame_position, timestamp=timestamp, fill=fill)
-        else:
-            self.pending_hits = 0
-            self._prev_present_t = None
-            self._first_present_t = None
+        elif self._first_present_t is not None:
+            # Проба без мешка внутри накопления: считаем её, но не рвём цепочку,
+            # пока зона не пуста дольше pending_gap_seconds подряд.
+            self._pending_total += 1
+            gap_limit = max(
+                ZONE_PENDING_GAP_FACTOR * self.effective_sample_period_seconds,
+                self.pending_gap_seconds,
+            )
+            if self._prev_present_t is not None and timestamp - self._prev_present_t > gap_limit:
+                self._reset_pending()
 
         self.last_fill = fill
         self.last_control_fill = control_fill
@@ -454,10 +518,15 @@ class HopperZoneEpisodeCounter:
     def finish(self) -> None:
         self._close_episode()
 
-    def _commit(self, frame_position: int, timestamp: float, fill: float) -> bool:
+    def _reset_pending(self) -> None:
         self.pending_hits = 0
         self._prev_present_t = None
         self._first_present_t = None
+        self._pending_present = 0
+        self._pending_total = 0
+
+    def _commit(self, frame_position: int, timestamp: float, fill: float) -> bool:
+        self._reset_pending()
         self.state = "active"
         self._last_present_t = timestamp
         self._episode_start_t = timestamp
@@ -511,6 +580,15 @@ class HopperZoneEpisodeCounter:
 
     def _update_stuck_suppression(self, fill: float, timestamp: float) -> None:
         if not self._suppressed_until_clear:
+            return
+        if (
+            self.stuck_max_suppress_seconds > 0.0
+            and self._suppressed_since is not None
+            and timestamp - self._suppressed_since >= self.stuck_max_suppress_seconds
+        ):
+            self._suppressed_until_clear = False
+            self._clear_since = None
+            self._suppressed_since = None
             return
         if fill < self.fill_stay:
             if self._clear_since is None:
@@ -668,6 +746,9 @@ class BagAnalyticsManager:
         self.fps_effective: float | None = None
         self.fps_source: str | None = None
         self.stream_stalled = False
+        self.commit_suppressed = False
+        self.pending_hits = 0
+        self.pending_seconds = 0.0
         self.last_zone_fill: float | None = None
         self.last_zone_baseline: float | None = None
         self.episode_state = "idle"
@@ -883,6 +964,7 @@ class BagAnalyticsManager:
             previous_signature = None
             motion_history: deque[tuple[float, float]] = deque()
             stalled = False
+            sample_log = self._open_sample_log()
 
             while not stop_event.is_set():
                 is_sample = stream_frame_index % frame_stride == 0
@@ -999,6 +1081,14 @@ class BagAnalyticsManager:
                     < STALL_DIFF_THRESHOLD
                 )
 
+                if sample_log is not None:
+                    sample_log = self._write_sample_log(
+                        sample_log,
+                        observation=observation,
+                        counter=counter,
+                        stalled=stalled,
+                    )
+
                 with self.lock:
                     if run_id != self.run_id:
                         return
@@ -1016,6 +1106,9 @@ class BagAnalyticsManager:
                         degraded=bool(counter.degraded),
                     )
                     self.stream_stalled = bool(stalled)
+                    self.commit_suppressed = bool(counter.commit_suppressed)
+                    self.pending_hits = int(counter.pending_hits)
+                    self.pending_seconds = round(float(counter.pending_seconds), 1)
                     self.bag_count = int(counter.count)
                     self.max_bag_count = int(counter.count)
                     self.frames_processed = sampled_frame_index
@@ -1543,11 +1636,64 @@ class BagAnalyticsManager:
 
         return int(final_count), int(max_count), sample_counts, int(support_frames)
 
+    def _open_sample_log(self) -> Any:
+        try:
+            directory = Path(SAMPLE_LOG_DIR)
+            if not directory.is_dir():
+                return None
+            path = directory / SAMPLE_LOG_NAME
+            if path.exists() and path.stat().st_size > SAMPLE_LOG_MAX_BYTES:
+                path.replace(directory / (SAMPLE_LOG_NAME + ".1"))
+            fresh = not path.exists()
+            handle = path.open("a", encoding="utf-8")
+            if fresh:
+                handle.write(
+                    "time_utc,fill,control,baseline,present,committed,state,"
+                    "pending_hits,pending_seconds,suppressed,stalled,count\n"
+                )
+            return handle
+        except Exception:
+            return None
+
+    def _write_sample_log(
+        self,
+        handle: Any,
+        observation: ZoneObservation,
+        counter: HopperZoneEpisodeCounter,
+        stalled: bool,
+    ) -> Any:
+        try:
+            handle.write(
+                "%s,%.4f,%.4f,%.4f,%d,%d,%s,%d,%.1f,%d,%d,%d\n"
+                % (
+                    datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    observation.fill,
+                    observation.control_fill,
+                    observation.baseline,
+                    int(observation.present),
+                    int(observation.committed),
+                    counter.state,
+                    int(counter.pending_hits),
+                    float(counter.pending_seconds),
+                    int(counter.commit_suppressed),
+                    int(stalled),
+                    int(counter.count),
+                )
+            )
+            handle.flush()
+            return handle
+        except Exception:
+            try:
+                handle.close()
+            except Exception:
+                pass
+            return None
+
     def _build_stall_message(self, seconds: float, final_count: int) -> str:
         return (
             f"Картинка в RTSP-потоке не меняется уже {int(seconds)} с - похоже, источник "
-            f"завис или отдаёт застывший кадр. Подсчёт приостановлен, учтено {final_count} "
-            "мешк(ов). Проверьте камеру и сеть."
+            f"завис или отдаёт застывший кадр. Учтено {final_count} мешк(ов); пока картинка "
+            "не оживёт, новых засчётов не будет. Проверьте камеру и сеть."
         )
 
     def _build_live_message(
@@ -3135,6 +3281,9 @@ class BagAnalyticsManager:
             "fps_source": self.fps_source,
             "episode_state": self.episode_state,
             "stream_stalled": self.stream_stalled,
+            "commit_suppressed": self.commit_suppressed,
+            "pending_hits": self.pending_hits,
+            "pending_seconds": self.pending_seconds,
             "zone_fill": (
                 round(float(self.last_zone_fill), 4) if self.last_zone_fill is not None else None
             ),
