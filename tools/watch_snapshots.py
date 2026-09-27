@@ -32,8 +32,8 @@ sys.path.insert(0, "/app")
 try:
     from app.analytics import ZONE_ABOVE_HOPPER, ZONE_CONTROL
 except Exception:
-    ZONE_ABOVE_HOPPER = (0.490, 0.000, 0.680, 0.212)
-    ZONE_CONTROL = (0.050, 0.020, 0.300, 0.250)
+    ZONE_ABOVE_HOPPER = (0.140, 0.000, 0.560, 0.280)
+    ZONE_CONTROL = (0.720, 0.020, 0.970, 0.240)
 
 OUT_DIR = Path(os.environ.get("WATCH_OUT_DIR", "/app/uploads/calib"))
 LOCAL = timezone(timedelta(hours=5))  # Екатеринбург, как в main.py

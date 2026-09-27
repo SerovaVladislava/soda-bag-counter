@@ -45,17 +45,25 @@ DETECTION_CAPTURE_JPEG_QUALITY = 80
 
 ZoneBox = tuple[float, float, float, float]
 
-# The only region that can produce a count: the column of air above the hopper
-# mouth, full-res (1270,0)-(1762,412) at 2592x1944.  Every measured floor or
-# platform bag has its bounding-box top at y >= 990 px, so a bag resting on the
-# floor contributes fill 0.000 here at any threshold.
-# NOTE: the permanent white soda-caked A-frame sling on the hopper rim,
-# (1430,300)-(1720,560), is NOT fully below this zone - its top 112 rows fall
-# inside it and account for about 0.6 percent of the zone area.  That is far
-# below fill_enter so it cannot count on its own, but the zone must not be
-# widened downwards on the assumption that the fixture is excluded.
-ZONE_ABOVE_HOPPER: ZoneBox = (0.490, 0.000, 0.680, 0.212)
-ZONE_CONTROL: ZoneBox = (0.050, 0.020, 0.300, 0.250)
+# Единственная область, которая может дать счёт: столб воздуха над горловиной
+# бункера. Задаётся в долях кадра и привязана к тому, куда смотрит камера.
+#
+# Записи 2025 года: бункер на 0.50-0.68 ширины кадра, зона над ним была
+# (0.490, 0.000, 0.680, 0.212). На площадке в сентябре 2026 камера смотрит
+# иначе: по кадрам 21-22.09 бункер стоит на 0.245-0.443 ширины, верх конуса
+# соды на 0.30 высоты. Ширина висящего над ним мешка выведена из журнала проб
+# 25.09 15:13-15:20: старая контрольная зона (x до 0.30) поднялась на +0.2,
+# старая зона счёта (x от 0.49) - на +0.06, то есть мешок занимал примерно
+# x 0.22-0.51. Зона взята с запасом вокруг него, чтобы мешок закрывал её на
+# 0.6-0.8 и не упирался в потолок fill_max даже при ошибке оценки в 0.05 по
+# каждому краю, а нижний край поставлен выше конуса соды, который растёт по
+# мере наполнения бункера.
+ZONE_ABOVE_HOPPER: ZoneBox = (0.140, 0.000, 0.560, 0.280)
+# Контрольная зона - опора по освещению, мешок над бункером в неё не попадает.
+# Правый верх кадра: те же трубы и балки, что и над бункером, но туда кран
+# приносит мешки с площадки справа - и их подъём контрольной зоны гасит,
+# что и нужно: пронос мимо камеры выгрузкой не является.
+ZONE_CONTROL: ZoneBox = (0.720, 0.020, 0.970, 0.240)
 ZONE_HOPPER_MOUTH: ZoneBox = (0.475, 0.232, 0.690, 0.310)
 ZONE_HOPPER_BODY: ZoneBox = (0.505, 0.310, 0.670, 0.480)
 ZONE_FLOOR_RIGHT: ZoneBox = (0.550, 0.520, 1.000, 1.000)
@@ -66,18 +74,28 @@ ZONE_GRAY_LEVEL = 140
 ZONE_SATURATION_MAX = 60
 ZONE_FILL_ENTER = 0.21
 ZONE_FILL_STAY = 0.17
-# Верхняя граница: мешок, висящий над бункером, закрывает зону не более чем на
-# 0.735 - измерено по 1203 пробам за 40 минут записей, выше 0.80 нет ни одной.
-# Зона видна под фиксированным углом, и мешок на расстоянии бункера в неё просто
-# не помещается целиком. Заполнение под единицу означает объект вплотную к
-# объективу - это кран несёт мешок мимо, а не выгрузка. На площадке заказчика
-# такой случай дал ровно 1.000.
-ZONE_FILL_MAX = 0.85
-ZONE_CONTROL_RATIO = 3.0
+# Верхняя граница: заполнение под единицу означает объект вплотную к
+# объективу - кран несёт мешок мимо, а не выгрузка; на площадке такой случай
+# дал ровно 1.000. На записях 2025 мешок над бункером закрывал зону не более
+# чем на 0.735 (1203 пробы), и потолок стоял на 0.85. Для зоны под ракурс
+# 2026 ширина мешка оценена по журналу, а не измерена по кадрам, поэтому
+# потолок поднят: лучше пропустить редкий пронос вплотную к камере, чем
+# отсечь настоящую выгрузку мешком чуть крупнее оценки.
+ZONE_FILL_MAX = 0.92
+# Контрольная зона сравнивается по ПРИРОСТАМ над базовыми линиями. Прежнее
+# правило fill >= 3 x контроль ночью на записях было незаметно (контроль 0.03),
+# а днём на площадке контроль держит 0.10-0.22, порог превращался в 0.3-0.66
+# и глушил всё подряд - 47 часов журнала без единой пробы с мешком.
+# Включённый свет поднимает обе зоны одинаково - подъём зоны не превышает
+# подъёма контроля, мешка нет. Мешок поднимает только зону.
+ZONE_CONTROL_EXCESS_RATIO = 1.5
 ZONE_BASELINE_WINDOW = 300
 ZONE_BASELINE_PERCENTILE = 20.0
 ZONE_BASELINE_MIN_SAMPLES = 30
-ZONE_BASELINE_MARGIN = 0.06
+# Запас над базовой линией пустой зоны. По журналу площадки включение света
+# в 05:00 поднимает пустую зону на 0.05-0.06 за минуту, дневной дрейф даёт
+# до 0.04 разброса; мешок над бункером даёт от 0.4.
+ZONE_BASELINE_MARGIN = 0.10
 ZONE_MIN_PRESENT_HITS = 2
 # A commit needs BOTH a minimum number of samples and a minimum amount of
 # WALL-CLOCK presence.  The sample count alone is meaningless: the sampling
@@ -258,7 +276,7 @@ class HopperZoneEpisodeCounter:
         fill_enter: float = ZONE_FILL_ENTER,
         fill_stay: float = ZONE_FILL_STAY,
         fill_max: float = ZONE_FILL_MAX,
-        control_ratio: float = ZONE_CONTROL_RATIO,
+        control_ratio: float = ZONE_CONTROL_EXCESS_RATIO,
         baseline_window: int = ZONE_BASELINE_WINDOW,
         baseline_percentile: float = ZONE_BASELINE_PERCENTILE,
         baseline_min_samples: int = ZONE_BASELINE_MIN_SAMPLES,
@@ -311,6 +329,8 @@ class HopperZoneEpisodeCounter:
         self.pending_hits = 0
 
         self._fills: deque[float] = deque(maxlen=max(int(baseline_window), 1))
+        self._control_fills: deque[float] = deque(maxlen=max(int(baseline_window), 1))
+        self.last_control_baseline: float | None = None
         self._commit_timestamps: deque[float] = deque(maxlen=self.max_commits_per_hour + 1)
         self._episodes: deque[dict[str, Any]] = deque(maxlen=self.max_tracked_episodes)
         self._open_episode: dict[str, Any] | None = None
@@ -419,10 +439,20 @@ class HopperZoneEpisodeCounter:
         # из присутствия и один эпизод засчитывается дважды.
         if self.state != "active":
             self._fills.append(fill)
+            self._control_fills.append(control_fill)
         baseline = (
             float(np.percentile(np.asarray(self._fills, dtype=np.float32), self.baseline_percentile))
             if len(self._fills) >= self.baseline_min_samples
             else 0.0
+        )
+        control_baseline = (
+            float(
+                np.percentile(
+                    np.asarray(self._control_fills, dtype=np.float32), self.baseline_percentile
+                )
+            )
+            if len(self._control_fills) >= self.baseline_min_samples
+            else None
         )
 
         threshold = self.fill_stay if self.state == "active" else self.fill_enter
@@ -433,8 +463,17 @@ class HopperZoneEpisodeCounter:
         # baseline_min_samples проб, до этого поправка равна нулю.
         threshold = max(threshold, baseline + self.baseline_margin)
         present = fill >= threshold
-        if present and self.control_ratio > 0.0:
-            present = fill >= self.control_ratio * max(control_fill, 1e-6)
+        # Первая минута после запуска: базовой линии ещё нет, а абсолютный
+        # порог днём ниже уровня пустой зоны (пустая зона держит 0.15-0.35,
+        # порог 0.21). Без базовой линии пустая зона выглядела бы мешком,
+        # эпизод открывался бы сразу и, пока он открыт, базовая линия не
+        # пополняется - замок на полчаса и ложный засчёт при каждом запуске.
+        if len(self._fills) < self.baseline_min_samples:
+            present = False
+        # Прирост зоны против прироста контрольной зоны.
+        if present and self.control_ratio > 0.0 and control_baseline is not None:
+            control_excess = max(control_fill - control_baseline, 0.0)
+            present = (fill - baseline) >= self.control_ratio * control_excess
         # Зона закрыта почти целиком - объект вплотную к объективу, а не над
         # бункером: кран несёт мешок мимо камеры.
         if present and 0.0 < self.fill_max < 1.0:
@@ -500,6 +539,7 @@ class HopperZoneEpisodeCounter:
         self.last_fill = fill
         self.last_control_fill = control_fill
         self.last_baseline = baseline
+        self.last_control_baseline = control_baseline
         if present:
             self.present_samples += 1
 
@@ -647,7 +687,7 @@ class BagAnalyticsManager:
         zone_fill_enter: float = ZONE_FILL_ENTER,
         zone_fill_stay: float = ZONE_FILL_STAY,
         zone_fill_max: float = ZONE_FILL_MAX,
-        zone_control_ratio: float = ZONE_CONTROL_RATIO,
+        zone_control_ratio: float = ZONE_CONTROL_EXCESS_RATIO,
         zone_baseline_window: int = ZONE_BASELINE_WINDOW,
         zone_baseline_percentile: float = ZONE_BASELINE_PERCENTILE,
         zone_baseline_min_samples: int = ZONE_BASELINE_MIN_SAMPLES,
@@ -751,6 +791,8 @@ class BagAnalyticsManager:
         self.pending_seconds = 0.0
         self.last_zone_fill: float | None = None
         self.last_zone_baseline: float | None = None
+        self.last_zone_control_fill: float | None = None
+        self.last_zone_control_baseline: float | None = None
         self.episode_state = "idle"
 
         self.stall_seconds = max(float(stall_seconds), 0.0)
@@ -1115,6 +1157,8 @@ class BagAnalyticsManager:
                     self.sample_counts = sample_counts
                     self.last_zone_fill = float(observation.fill)
                     self.last_zone_baseline = float(observation.baseline)
+                    self.last_zone_control_fill = float(observation.control_fill)
+                    self.last_zone_control_baseline = counter.last_control_baseline
                     self.episode_state = counter.state
                     self.completed_at = None
                     self.last_result_at = datetime.now(timezone.utc)
@@ -2419,16 +2463,6 @@ class BagAnalyticsManager:
         if fill < self.zone_fill_enter:
             return None
 
-        if self.zone_control_ratio > 0.0:
-            control_fill = _zone_fill(
-                frame,
-                self.zone_control,
-                self.zone_gray_level,
-                self.zone_saturation_max,
-            )
-            if fill < self.zone_control_ratio * max(control_fill, 1e-6):
-                return None
-
         frame_height, frame_width = frame.shape[:2]
         x1, y1, x2, y2 = _zone_bounds(frame_width, frame_height, self.zone_above_hopper)
         return BagCandidate(
@@ -3296,7 +3330,21 @@ class BagAnalyticsManager:
                 "absence_seconds": float(getattr(self, "zone_absence_seconds", ZONE_ABSENCE_SECONDS)),
                 "stuck_max_suppress_seconds": float(ZONE_STUCK_MAX_SUPPRESS_SECONDS),
                 "stall_seconds": float(getattr(self, "stall_seconds", STALL_SECONDS)),
+                "baseline_margin": float(getattr(self, "zone_baseline_margin", ZONE_BASELINE_MARGIN)),
+                "control_excess_ratio": float(getattr(self, "zone_control_ratio", ZONE_CONTROL_EXCESS_RATIO)),
+                "zone": [float(v) for v in getattr(self, "zone_above_hopper", ZONE_ABOVE_HOPPER)],
+                "control_zone": [float(v) for v in getattr(self, "zone_control", ZONE_CONTROL)],
             },
+            "zone_control_fill": (
+                round(float(self.last_zone_control_fill), 4)
+                if getattr(self, "last_zone_control_fill", None) is not None
+                else None
+            ),
+            "zone_control_baseline": (
+                round(float(self.last_zone_control_baseline), 4)
+                if getattr(self, "last_zone_control_baseline", None) is not None
+                else None
+            ),
             "zone_fill": (
                 round(float(self.last_zone_fill), 4) if self.last_zone_fill is not None else None
             ),
