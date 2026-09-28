@@ -18,7 +18,7 @@ LOG = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("/app/uploads/zone_sample
 LOCAL = timezone(timedelta(hours=5))  # Екатеринбург, как в main.py
 FILL_ENTER = 0.21        # ZONE_FILL_ENTER
 FILL_MAX = 0.92          # ZONE_FILL_MAX
-BASELINE_MARGIN = 0.10   # ZONE_BASELINE_MARGIN, запас над базовой линией пустой зоны
+BASELINE_MARGIN = 0.12   # ZONE_BASELINE_MARGIN, запас над базовой линией пустой зоны
 MIN_PRESENT = 10.0       # ZONE_MIN_PRESENT_SECONDS
 GAP_SECONDS = 20.0       # разрыв, который ещё не делит одно появление на два
 

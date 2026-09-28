@@ -29,7 +29,13 @@ STALL_SIGNATURE_SIZE = 32
 # у застывшего потока бывают всплески до 3.5 из-за битых макроблоков при
 # потере пакетов, и они перекрывают весь диапазон живой сцены. Медиана к
 # таким выбросам невосприимчива.
-STALL_DIFF_THRESHOLD = 0.1
+# Порог 0.1 оказался на уровне шума статичной ночной сцены: на площадке
+# «замер» вспыхивал по 1-2 минуты при живой картинке (заполнение зоны при этом
+# менялось). Измерено на кадрах записи: застывший кадр после перекодирования
+# даёт медиану ровно 0.000, та же сцена с шумом сенсора сигма 1 - 0.016,
+# сигма 2 - 0.032. Порог 0.01 ниже самой тихой живой сцены. Медиана различий
+# пишется в статус (stall_motion) и в журнал проб (motion) для настройки.
+STALL_DIFF_THRESHOLD = 0.01
 STALL_SECONDS = 90.0
 STALL_MIN_SAMPLES = 10
 
@@ -39,6 +45,10 @@ STALL_MIN_SAMPLES = 10
 SAMPLE_LOG_DIR = os.environ.get("BAG_SAMPLE_LOG_DIR", "/app/uploads")
 SAMPLE_LOG_NAME = "zone_samples.csv"
 SAMPLE_LOG_MAX_BYTES = 25 * 1024 * 1024
+SAMPLE_LOG_HEADER = (
+    "time_utc,fill,control,baseline,present,committed,state,"
+    "pending_hits,pending_seconds,suppressed,stalled,count,motion\n"
+)
 
 DETECTION_CAPTURE_WIDTH = 1280
 DETECTION_CAPTURE_JPEG_QUALITY = 80
@@ -51,14 +61,17 @@ ZoneBox = tuple[float, float, float, float]
 # Записи 2025 года: бункер на 0.50-0.68 ширины кадра, зона над ним была
 # (0.490, 0.000, 0.680, 0.212). На площадке в сентябре 2026 камера смотрит
 # иначе: по кадрам 21-22.09 бункер стоит на 0.245-0.443 ширины, верх конуса
-# соды на 0.30 высоты. Ширина висящего над ним мешка выведена из журнала проб
-# 25.09 15:13-15:20: старая контрольная зона (x до 0.30) поднялась на +0.2,
-# старая зона счёта (x от 0.49) - на +0.06, то есть мешок занимал примерно
-# x 0.22-0.51. Зона взята с запасом вокруг него, чтобы мешок закрывал её на
-# 0.6-0.8 и не упирался в потолок fill_max даже при ошибке оценки в 0.05 по
-# каждому краю, а нижний край поставлен выше конуса соды, который растёт по
-# мере наполнения бункера.
-ZONE_ABOVE_HOPPER: ZoneBox = (0.140, 0.000, 0.560, 0.280)
+# соды на 0.30 высоты. Первые две выгрузки через новую зону (27.09 21:48 и
+# 21:54) показали мешок над воронкой на x 0.25-0.42 - иначе и быть не может:
+# чтобы высыпать соду, мешок обязан висеть над горловиной. Зона взята чуть
+# шире мешка: при полном перекрытии он даёт около 0.7, ниже потолка fill_max,
+# а доля мешка в зоне (0.65 против 0.40 у широкой зоны 0.14-0.56) поднимает
+# прирост в хвосте выгрузки с 0.11 до 0.2 и даёт запас против солнца, которое
+# 27.09 в 14:37 подняло пустую зону скачком на 0.09. Мешок, который кран ещё
+# только подводит слева (x 0.02-0.30 на кадре 21:48:56), задевает зону краем
+# и открывает тот же эпизод. Нижний край - выше конуса соды, который растёт
+# по мере наполнения бункера.
+ZONE_ABOVE_HOPPER: ZoneBox = (0.210, 0.000, 0.470, 0.280)
 # Контрольная зона - опора по освещению, мешок над бункером в неё не попадает.
 # Правый верх кадра: те же трубы и балки, что и над бункером, но туда кран
 # приносит мешки с площадки справа - и их подъём контрольной зоны гасит,
@@ -89,13 +102,20 @@ ZONE_FILL_MAX = 0.92
 # Включённый свет поднимает обе зоны одинаково - подъём зоны не превышает
 # подъёма контроля, мешка нет. Мешок поднимает только зону.
 ZONE_CONTROL_EXCESS_RATIO = 1.5
+# Базовая линия пустой зоны: 20-й процентиль за последние 10 минут проб без
+# эпизода. Медиана следила бы за солнцем лучше, но отравляется мешком: на
+# записи 0908-0248 мешок приходит на 30-й секунде, до появления базовой
+# линии, и медиана первых проб на 5 минут поднимает порог выше мешка - первая
+# выгрузка потеряна. 20-й процентиль терпит до 80 % проб с мешком в окне.
 ZONE_BASELINE_WINDOW = 300
 ZONE_BASELINE_PERCENTILE = 20.0
 ZONE_BASELINE_MIN_SAMPLES = 30
 # Запас над базовой линией пустой зоны. По журналу площадки включение света
-# в 05:00 поднимает пустую зону на 0.05-0.06 за минуту, дневной дрейф даёт
-# до 0.04 разброса; мешок над бункером даёт от 0.4.
-ZONE_BASELINE_MARGIN = 0.10
+# в 05:00 поднимает пустую зону на 0.05-0.06 за минуту, солнце из-за облака
+# 27.09 14:37 - скачком на 0.09 на три минуты при спокойной контрольной зоне.
+# Мешок над воронкой в зоне по своей ширине даёт прирост от 0.2 даже в хвосте
+# выгрузки, когда он уже обвис.
+ZONE_BASELINE_MARGIN = 0.12
 ZONE_MIN_PRESENT_HITS = 2
 # A commit needs BOTH a minimum number of samples and a minimum amount of
 # WALL-CLOCK presence.  The sample count alone is meaningless: the sampling
@@ -119,7 +139,11 @@ ZONE_MIN_PRESENT_SECONDS = 10.0
 # накопления мешок был виден хотя бы на половине проб.
 ZONE_PENDING_GAP_SECONDS = 8.0
 ZONE_PENDING_MIN_FRACTION = 0.5
-ZONE_ABSENCE_SECONDS = 20.0
+# Закрытие эпизода: зона пуста столько секунд подряд. Обвисший мешок в хвосте
+# выгрузки проваливается под порог сериями по 20-25 с (площадка 27.09 21:51),
+# и при 20 с эпизод расщеплялся бы на два засчёта. Две выгрузки подряд
+# ближе 30 с не бывают: между мешками 27.09 прошло 2,5 минуты.
+ZONE_ABSENCE_SECONDS = 30.0
 ZONE_SAMPLE_PERIOD_SECONDS = 2.0
 ZONE_MAX_SAMPLE_PERIOD_SECONDS = 5.0
 ZONE_MAX_COMMITS_PER_HOUR = 30
@@ -793,6 +817,7 @@ class BagAnalyticsManager:
         self.last_zone_baseline: float | None = None
         self.last_zone_control_fill: float | None = None
         self.last_zone_control_baseline: float | None = None
+        self.stall_motion: float | None = None
         self.episode_state = "idle"
 
         self.stall_seconds = max(float(stall_seconds), 0.0)
@@ -1115,12 +1140,16 @@ class BagAnalyticsManager:
                     while motion_history and timestamp - motion_history[0][0] > self.stall_seconds:
                         motion_history.popleft()
                 previous_signature = signature
+                motion_median = (
+                    float(np.median([value for _, value in motion_history]))
+                    if len(motion_history) >= STALL_MIN_SAMPLES
+                    else None
+                )
                 stalled = (
                     self.stall_seconds > 0.0
-                    and len(motion_history) >= STALL_MIN_SAMPLES
+                    and motion_median is not None
                     and timestamp - motion_history[0][0] >= self.stall_seconds * 0.8
-                    and float(np.median([value for _, value in motion_history]))
-                    < STALL_DIFF_THRESHOLD
+                    and motion_median < STALL_DIFF_THRESHOLD
                 )
 
                 if sample_log is not None:
@@ -1129,6 +1158,7 @@ class BagAnalyticsManager:
                         observation=observation,
                         counter=counter,
                         stalled=stalled,
+                        motion=motion_median,
                     )
 
                 with self.lock:
@@ -1148,6 +1178,7 @@ class BagAnalyticsManager:
                         degraded=bool(counter.degraded),
                     )
                     self.stream_stalled = bool(stalled)
+                    self.stall_motion = motion_median
                     self.commit_suppressed = bool(counter.commit_suppressed)
                     self.pending_hits = int(counter.pending_hits)
                     self.pending_seconds = round(float(counter.pending_seconds), 1)
@@ -1686,15 +1717,18 @@ class BagAnalyticsManager:
             if not directory.is_dir():
                 return None
             path = directory / SAMPLE_LOG_NAME
-            if path.exists() and path.stat().st_size > SAMPLE_LOG_MAX_BYTES:
+            rotate = path.exists() and path.stat().st_size > SAMPLE_LOG_MAX_BYTES
+            if path.exists() and not rotate:
+                # Старый файл с другим набором столбцов дописывать нельзя:
+                # строки перестанут сходиться с заголовком.
+                with path.open("r", encoding="utf-8") as existing:
+                    rotate = existing.readline() != SAMPLE_LOG_HEADER
+            if rotate:
                 path.replace(directory / (SAMPLE_LOG_NAME + ".1"))
             fresh = not path.exists()
             handle = path.open("a", encoding="utf-8")
             if fresh:
-                handle.write(
-                    "time_utc,fill,control,baseline,present,committed,state,"
-                    "pending_hits,pending_seconds,suppressed,stalled,count\n"
-                )
+                handle.write(SAMPLE_LOG_HEADER)
             return handle
         except Exception:
             return None
@@ -1705,10 +1739,11 @@ class BagAnalyticsManager:
         observation: ZoneObservation,
         counter: HopperZoneEpisodeCounter,
         stalled: bool,
+        motion: float | None = None,
     ) -> Any:
         try:
             handle.write(
-                "%s,%.4f,%.4f,%.4f,%d,%d,%s,%d,%.1f,%d,%d,%d\n"
+                "%s,%.4f,%.4f,%.4f,%d,%d,%s,%d,%.1f,%d,%d,%d,%s\n"
                 % (
                     datetime.now(timezone.utc).isoformat(timespec="seconds"),
                     observation.fill,
@@ -1722,6 +1757,7 @@ class BagAnalyticsManager:
                     int(counter.commit_suppressed),
                     int(stalled),
                     int(counter.count),
+                    "" if motion is None else "%.4f" % motion,
                 )
             )
             handle.flush()
@@ -3315,6 +3351,11 @@ class BagAnalyticsManager:
             "fps_source": self.fps_source,
             "episode_state": self.episode_state,
             "stream_stalled": self.stream_stalled,
+            "stall_motion": (
+                round(float(self.stall_motion), 4)
+                if getattr(self, "stall_motion", None) is not None
+                else None
+            ),
             "commit_suppressed": self.commit_suppressed,
             "pending_hits": self.pending_hits,
             "pending_seconds": self.pending_seconds,

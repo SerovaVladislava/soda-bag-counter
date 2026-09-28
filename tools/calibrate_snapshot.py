@@ -21,7 +21,7 @@ sys.path.insert(0, "/app")
 try:
     from app.analytics import ZONE_ABOVE_HOPPER, ZONE_CONTROL, _zone_bounds
 except Exception:
-    ZONE_ABOVE_HOPPER = (0.140, 0.000, 0.560, 0.280)
+    ZONE_ABOVE_HOPPER = (0.210, 0.000, 0.470, 0.280)
     ZONE_CONTROL = (0.720, 0.020, 0.970, 0.240)
     _zone_bounds = None
 
