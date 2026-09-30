@@ -20,6 +20,7 @@ FILL_ENTER = 0.21        # ZONE_FILL_ENTER
 FILL_MAX = 0.92          # ZONE_FILL_MAX
 BASELINE_MARGIN = 0.12   # ZONE_BASELINE_MARGIN, запас над базовой линией пустой зоны
 MIN_PRESENT = 10.0       # ZONE_MIN_PRESENT_SECONDS
+SOLID_MIN = 0.25         # ZONE_SOLID_MIN, доля сплошных столбцов для открытия эпизода
 GAP_SECONDS = 20.0       # разрыв, который ещё не делит одно появление на два
 
 try:
@@ -53,6 +54,7 @@ def main() -> int:
                         "suppressed": raw["suppressed"] == "1",
                         "stalled": raw["stalled"] == "1",
                         "count": int(raw["count"]),
+                        "solid": float(raw["solid"]) if raw.get("solid") else None,
                     }
                 )
             except (KeyError, ValueError):
@@ -98,12 +100,14 @@ def main() -> int:
                 current["last"] = r["t"]
                 current["n"] += 1
                 current["peak"] = max(current["peak"], r["fill"])
+                current["solid"] = max(current["solid"], r["solid"] or 0.0)
                 current["present"] += int(r["present"])
                 current["committed"] |= r["committed"]
             else:
                 if current:
                     events.append(current)
                 current = {"start": r["t"], "last": r["t"], "n": 1, "peak": r["fill"],
+                           "solid": r["solid"] or 0.0,
                            "present": int(r["present"]), "committed": r["committed"]}
         elif current and r["committed"]:
             current["committed"] = True
@@ -126,6 +130,8 @@ def main() -> int:
             verdict = f"не засчитан: заполнение выше {FILL_MAX:.2f} - объект вплотную к камере"
         elif dur < MIN_PRESENT:
             verdict = f"не засчитан: в зоне {dur:.0f} с, меньше {MIN_PRESENT:.0f} - перенос мимо камеры"
+        elif e["solid"] < SOLID_MIN:
+            verdict = f"не засчитан: светлое пятно без сплошного блока (сплошность {e['solid']:.2f}) - солнце или блики"
         elif e["present"] < e["n"] // 2:
             verdict = "не засчитан: пробы с мешком - меньше половины (отсечено контрольной зоной или потолком)"
         else:
