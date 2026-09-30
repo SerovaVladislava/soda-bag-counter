@@ -140,6 +140,35 @@ docker compose exec backend python /app/uploads/watch_snapshots.py "rtsp://сс�
 кадры, где мешок висит над бункером, и один-два опорных. Мониторинг при этом
 продолжает работать: скрипт открывает отдельное подключение к камере.
 
+## Запись суток с камеры - для настройки по реальному видео
+
+Самый надёжный способ довести счёт: записать сутки работы и проверить
+подсчёт на этой записи до отправки правки, а не по журналу после. Скрипт
+`tools/record_day.py` пишет поток кусками по 10 минут в уменьшенном размере
+(1024x768, 2 кадра/с, 10-20 МБ на кусок, 1-3 ГБ за сутки); ffmpeg в
+контейнере уже есть. Скачайте скрипт в `data/uploads`:
+
+```
+https://raw.githubusercontent.com/SerovaVladislava/soda-bag-counter/main/tools/record_day.py
+```
+
+и запустите (второй аргумент - часы записи):
+
+```bash
+docker compose exec -d backend python /app/uploads/record_day.py "rtsp://ссылка-потока-из-карточки-Камера-1" 24
+```
+
+Куски появляются в `data/uploads/recordings`, имя файла - местное время начала
+куска. Ход записи виден в `data/uploads/recordings/record.log`. Мониторинг
+при этом работает, это отдельное подключение к камере. Остановить раньше:
+
+```bash
+docker compose exec backend pkill -f record_day.py
+```
+
+Пришлите куски за время, когда были выгрузки, кусок солнечного дня
+(14:00-15:40) и `zone_samples.csv` за тот же день.
+
 ## Как откатиться
 
 Удалите `docker-compose.override.yml` и `analytics.py`, затем `docker compose up -d`.
