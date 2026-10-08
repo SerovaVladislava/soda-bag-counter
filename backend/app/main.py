@@ -44,8 +44,6 @@ MONITOR_POLL_SECONDS = 1.0
 DEFAULT_SHIFT_HISTORY_LIMIT = 90
 MAX_SHIFT_HISTORY_LIMIT = 365
 MAX_SHIFT_HISTORY_EXPORT_ROWS = 5000
-DEMO_SHIFT_HISTORY_DAYS = 30
-MIN_DEMO_SHIFT_HISTORY_ROWS = 60
 RTSP_MONITOR_LIMIT = 2
 # Видео в каталоге загрузок определяется по расширению, а не по списку
 # исключений: денylist уже трижды принимал за видео служебные файлы
@@ -935,99 +933,6 @@ class BagShiftHistoryManager:
         )
         return rows[: max(int(limit), 1)]
 
-    def ensure_demo_rows(
-        self,
-        streams: list[dict[str, str]] | None = None,
-        *,
-        days: int = DEMO_SHIFT_HISTORY_DAYS,
-        min_rows: int = MIN_DEMO_SHIFT_HISTORY_ROWS,
-    ) -> int:
-        normalized_streams: list[dict[str, str]] = []
-        for stream in streams or []:
-            stream_id = str(stream.get("id") or "").strip()
-            stream_name = " ".join(str(stream.get("name") or "").split())
-            stream_url = str(stream.get("url") or "").strip()
-            if not stream_id or not stream_name or not stream_url:
-                continue
-            normalized_streams.append(
-                {
-                    "id": stream_id,
-                    "name": stream_name,
-                    "url": stream_url,
-                }
-            )
-
-        if not normalized_streams:
-            normalized_streams = [
-                {
-                    "id": "demo-reagents",
-                    "name": "Цех по обработке реагентов",
-                    "url": PUBLIC_RTSP_URL,
-                },
-                {
-                    "id": "demo-loading",
-                    "name": "Цех по загрузке реагентов",
-                    "url": PUBLIC_RTSP_URL,
-                },
-            ]
-        elif len(normalized_streams) == 1:
-            normalized_streams.append(
-                {
-                    "id": "demo-loading",
-                    "name": "Цех по загрузке реагентов",
-                    "url": PUBLIC_RTSP_URL,
-                }
-            )
-
-        with self.lock:
-            if len(self.rows) >= max(int(min_rows), 1):
-                return 0
-
-            added_count = 0
-            stream_samples = normalized_streams[:2]
-            current_local_date = datetime.now(LOCAL_TIMEZONE).date()
-
-            for day_offset in range(max(int(days), 1) - 1, -1, -1):
-                target_date = current_local_date - timedelta(days=day_offset)
-                bucket_date = target_date.isoformat()
-
-                for stream_index, stream in enumerate(stream_samples):
-                    if self._find_row_locked(stream["id"], bucket_date) is not None:
-                        continue
-
-                    day_count = 2 + ((day_offset + stream_index * 2) % 6)
-                    night_count = (day_offset * 2 + stream_index) % 5
-                    if (day_offset + stream_index) % 4 == 0:
-                        night_count += 1
-
-                    updated_local = datetime(
-                        target_date.year,
-                        target_date.month,
-                        target_date.day,
-                        19 if night_count == 0 else 23,
-                        20 + stream_index * 10,
-                        tzinfo=LOCAL_TIMEZONE,
-                    )
-                    self.rows.append(
-                        {
-                            "stream_id": stream["id"],
-                            "stream_name": stream["name"],
-                            "stream_url": stream["url"],
-                            "date": bucket_date,
-                            "day_count": day_count,
-                            "night_count": night_count,
-                            "total_count": day_count + night_count,
-                            "updated_at": updated_local.astimezone(timezone.utc).isoformat(),
-                        }
-                    )
-                    added_count += 1
-
-            if added_count:
-                self._sort_rows_locked()
-                self._save_locked()
-
-            return added_count
-
     def today_summary(self, stream_id: str | None = None) -> dict[str, Any]:
         target_date, _ = resolve_shift_bucket()
         summary = {
@@ -1389,56 +1294,6 @@ class AggregatedBagShiftHistoryManager(BagShiftHistoryManager):
             reverse=True,
         )
         return rows[: max(int(limit), 1)]
-
-    def ensure_demo_rows(
-        self,
-        streams: list[dict[str, str]] | None = None,
-        *,
-        days: int = DEMO_SHIFT_HISTORY_DAYS,
-        min_rows: int = MIN_DEMO_SHIFT_HISTORY_ROWS,
-    ) -> int:
-        del streams
-        with self.lock:
-            if len(self.rows) >= max(int(min_rows), 1):
-                return 0
-
-            added_count = 0
-            current_local_date = datetime.now(LOCAL_TIMEZONE).date()
-            for day_offset in range(max(int(days), 1) - 1, -1, -1):
-                target_date = current_local_date - timedelta(days=day_offset)
-                bucket_date = target_date.isoformat()
-                if self._find_row_locked(bucket_date) is not None:
-                    continue
-
-                day_count = 2 + (day_offset % 6)
-                night_count = (day_offset * 2) % 5
-                if day_offset % 4 == 0:
-                    night_count += 1
-
-                updated_local = datetime(
-                    target_date.year,
-                    target_date.month,
-                    target_date.day,
-                    19 if night_count == 0 else 23,
-                    20,
-                    tzinfo=LOCAL_TIMEZONE,
-                )
-                self.rows.append(
-                    {
-                        "date": bucket_date,
-                        "day_count": day_count,
-                        "night_count": night_count,
-                        "total_count": day_count + night_count,
-                        "updated_at": updated_local.astimezone(timezone.utc).isoformat(),
-                    }
-                )
-                added_count += 1
-
-            if added_count:
-                self._sort_rows_locked()
-                self._save_locked()
-
-            return added_count
 
     def today_summary(self, stream_id: str | None = None) -> dict[str, Any]:
         del stream_id
@@ -2314,7 +2169,6 @@ async def lifespan(_: FastAPI):
     manager.ensure_dirs()
     rtsp_history.ensure_storage()
     bag_shift_history.ensure_storage()
-    bag_shift_history.ensure_demo_rows(rtsp_history.list())
     detection_archive.ensure_storage()
     try:
         yield

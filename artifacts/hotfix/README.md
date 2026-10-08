@@ -8,16 +8,39 @@
 
 Всё делается в папке, где лежит `docker-compose.yml` (обычно `soda-bag-counter`).
 
-1. Скачайте в эту папку два файла:
+1. Скачайте в эту папку четыре файла:
 
    - `docker-compose.override.yml` — отсюда же, из `artifacts/hotfix/`
-   - `analytics.py` — из `backend/app/analytics.py` в корне репозитория
+   - `analytics.py` и `main.py` — из `backend/app/` в корне репозитория
+   - `index.html` — из `frontend/`
 
-   Прямые ссылки:
+   Все четыре обязательны: override подменяет каждый из них, и если файла
+   нет на диске, Docker создаст вместо него пустую папку, а контейнер не
+   запустится. Прямые ссылки:
 
    ```
    https://raw.githubusercontent.com/SerovaVladislava/soda-bag-counter/main/artifacts/hotfix/docker-compose.override.yml
    https://raw.githubusercontent.com/SerovaVladislava/soda-bag-counter/main/backend/app/analytics.py
+   https://raw.githubusercontent.com/SerovaVladislava/soda-bag-counter/main/backend/app/main.py
+   https://raw.githubusercontent.com/SerovaVladislava/soda-bag-counter/main/frontend/index.html
+   ```
+
+   Команды для `cmd` в папке установки:
+
+   ```bash
+   curl.exe -LO https://raw.githubusercontent.com/SerovaVladislava/soda-bag-counter/main/artifacts/hotfix/docker-compose.override.yml
+   ```
+
+   ```bash
+   curl.exe -LO https://raw.githubusercontent.com/SerovaVladislava/soda-bag-counter/main/backend/app/analytics.py
+   ```
+
+   ```bash
+   curl.exe -LO https://raw.githubusercontent.com/SerovaVladislava/soda-bag-counter/main/backend/app/main.py
+   ```
+
+   ```bash
+   curl.exe -LO https://raw.githubusercontent.com/SerovaVladislava/soda-bag-counter/main/frontend/index.html
    ```
 
 2. Примените:
@@ -139,6 +162,30 @@ docker compose exec backend python /app/uploads/watch_snapshots.py "rtsp://сс�
 бункером должен попадать в оранжевую и не попадать в зелёную. Пришлите те
 кадры, где мешок висит над бункером, и один-два опорных. Мониторинг при этом
 продолжает работать: скрипт открывает отдельное подключение к камере.
+
+## Выдуманная история смен в установках до 08.10.2026
+
+До версии от 08.10.2026 сервер при первом запуске сам дописывал в «Историю
+мешков по сменам» 30 дней демонстрационных значений для потоков из реестра
+и для несуществующего потока «Цех по загрузке реагентов». Эти строки
+выглядят как настоящие. Генерация убрана, а накопившиеся строки чистит
+`tools/reset_shift_history.py`: он удаляет потоки, которых нет в реестре,
+и всё старше указанной даты (первой, которую нужно оставить). Скачайте его
+в `data/uploads` и выполните, подставив дату начала настоящего подсчёта:
+
+```bash
+curl.exe -L -o data\uploads\reset_shift_history.py https://raw.githubusercontent.com/SerovaVladislava/soda-bag-counter/main/tools/reset_shift_history.py
+```
+
+```bash
+docker compose exec backend python /app/uploads/reset_shift_history.py 2026-09-27
+```
+
+```bash
+docker compose restart backend
+```
+
+Исходный файл истории сохраняется рядом как `bag_shift_history.json.bak`.
 
 ## Запись суток с камеры - для настройки по реальному видео
 

@@ -847,16 +847,16 @@
           </div>
           <div class="history-toolbar">
             <label class="field">
-              <span class="field-label">РЎ РґР°С‚С‹</span>
+              <span class="field-label">С даты</span>
               <input id="shiftDateFromInput" type="date" />
             </label>
             <label class="field">
-              <span class="field-label">РџРѕ РґР°С‚Сѓ</span>
+              <span class="field-label">По дату</span>
               <input id="shiftDateToInput" type="date" />
             </label>
             <div class="history-toolbar-actions">
-              <button id="applyShiftHistoryFilterButton" class="secondary" type="button">РџРѕРєР°Р·Р°С‚СЊ</button>
-              <button id="exportShiftHistoryButton" class="primary" type="button">Р’С‹РіСЂСѓР·РёС‚СЊ Excel</button>
+              <button id="applyShiftHistoryFilterButton" class="secondary" type="button">Показать</button>
+              <button id="exportShiftHistoryButton" class="primary" type="button">Выгрузить Excel</button>
             </div>
           </div>
           <div id="shiftHistoryMessage" class="message"></div>
@@ -1257,7 +1257,7 @@ function renderShiftHistory(items) {
         const response = await fetch(`/api/rtsp-monitor/history/export?${params.toString()}`);
         if (!response.ok) {
           const data = await response.json().catch(() => ({}));
-          throw new Error(data.detail || data.message || "РћС€РёР±РєР° РІС‹РіСЂСѓР·РєРё.");
+          throw new Error(data.detail || data.message || "Ошибка выгрузки.");
         }
 
         const blob = await response.blob();
@@ -1476,10 +1476,10 @@ function renderShiftHistory(items) {
 
       applyShiftHistoryFilterButton.addEventListener("click", async () => {
         applyShiftHistoryFilterButton.disabled = true;
-        setMessage(shiftHistoryMessage, "РћР±РЅРѕРІР»СЏСЋ РёСЃС‚РѕСЂРёСЋ РїРѕ РІС‹Р±СЂР°РЅРЅРѕРјСѓ РїРµСЂРёРѕРґСѓ...", "warn");
+        setMessage(shiftHistoryMessage, "Обновляю историю по выбранному периоду...", "warn");
         try {
           await refreshShiftHistory({ quiet: true });
-          setMessage(shiftHistoryMessage, "РСЃС‚РѕСЂРёСЏ РїРѕ РІС‹Р±СЂР°РЅРЅРѕРјСѓ РїРµСЂРёРѕРґСѓ РѕР±РЅРѕРІР»РµРЅР°.", "ok");
+          setMessage(shiftHistoryMessage, "История по выбранному периоду обновлена.", "ok");
         } catch (error) {
           setMessage(shiftHistoryMessage, error.message, "error");
         } finally {
@@ -1489,7 +1489,7 @@ function renderShiftHistory(items) {
 
       exportShiftHistoryButton.addEventListener("click", async () => {
         exportShiftHistoryButton.disabled = true;
-        setMessage(shiftHistoryMessage, "Р“РѕС‚РѕРІР»СЋ Excel-С„Р°Р№Р» СЃ РёСЃС‚РѕСЂРёРµР№...", "warn");
+        setMessage(shiftHistoryMessage, "Готовлю Excel-файл с историей...", "warn");
         try {
           const filename = await exportShiftHistory();
           setMessage(shiftHistoryMessage, `Р¤Р°Р№Р» ${filename} РіРѕС‚РѕРІ Рє СЃРєР°С‡РёРІР°РЅРёСЋ.`, "ok");

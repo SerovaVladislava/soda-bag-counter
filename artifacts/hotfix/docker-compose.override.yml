@@ -5,12 +5,13 @@
 # с диска — образ пересобирать не нужно.
 #
 # Как применить:
-#   1. Положите рядом с docker-compose.yml этот файл и analytics.py
+#   1. Положите рядом с docker-compose.yml этот файл и подменяемые файлы:
+#      analytics.py, main.py (из backend/app) и index.html (из frontend)
 #   2. docker compose up -d
+#      (если override уже стоял и менялись только файлы - docker compose restart backend)
 #
-# Строка с main.py закомментирована: правки в нём касаются публикации
-# загруженного видеофайла и не нужны, когда источник — реальная камера.
-# Если понадобится, скачайте backend/app/main.py и снимите комментарий.
+# Все три файла обязательны: если какого-то нет на диске, Docker создаст
+# вместо него пустую папку и контейнер не запустится.
 #
 # Как откатиться: удалите этот файл и подменяемые файлы, затем
 # docker compose up -d
@@ -20,4 +21,5 @@ services:
     volumes:
       - ./data/uploads:/app/uploads
       - ./analytics.py:/app/app/analytics.py:ro
-      # - ./main.py:/app/app/main.py:ro
+      - ./main.py:/app/app/main.py:ro
+      - ./index.html:/app/frontend/index.html:ro
