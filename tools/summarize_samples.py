@@ -55,6 +55,7 @@ def main() -> int:
                         "stalled": raw["stalled"] == "1",
                         "count": int(raw["count"]),
                         "solid": float(raw["solid"]) if raw.get("solid") else None,
+                        "det": float(raw["det"]) if raw.get("det") else None,
                     }
                 )
             except (KeyError, ValueError):
@@ -101,13 +102,14 @@ def main() -> int:
                 current["n"] += 1
                 current["peak"] = max(current["peak"], r["fill"])
                 current["solid"] = max(current["solid"], r["solid"] or 0.0)
+                current["det"] = max(current["det"], r["det"] or 0.0)
                 current["present"] += int(r["present"])
                 current["committed"] |= r["committed"]
             else:
                 if current:
                     events.append(current)
                 current = {"start": r["t"], "last": r["t"], "n": 1, "peak": r["fill"],
-                           "solid": r["solid"] or 0.0,
+                           "solid": r["solid"] or 0.0, "det": r["det"] or 0.0,
                            "present": int(r["present"]), "committed": r["committed"]}
         elif current and r["committed"]:
             current["committed"] = True
@@ -121,7 +123,7 @@ def main() -> int:
         return 0
 
     print(f"Появления в зоне: {len(events)}")
-    print(f"{'начало':>14} {'длит.':>7} {'проб':>5} {'пик':>6}  решение")
+    print(f"{'начало':>14} {'длит.':>7} {'проб':>5} {'пик':>6} {'детект':>6}  решение")
     for e in events:
         dur = (e["last"] - e["start"]).total_seconds()
         if e["committed"]:
@@ -136,7 +138,7 @@ def main() -> int:
             verdict = "не засчитан: пробы с мешком - меньше половины (отсечено контрольной зоной или потолком)"
         else:
             verdict = "НЕ ЗАСЧИТАН - разобрать по журналу"
-        print(f"{e['start']:%d.%m %H:%M:%S} {dur:>6.0f}с {e['n']:>5} {e['peak']:>6.3f}  {verdict}")
+        print(f"{e['start']:%d.%m %H:%M:%S} {dur:>6.0f}с {e['n']:>5} {e['peak']:>6.3f} {e['det']:>6.2f}  {verdict}")
 
     return 0
 

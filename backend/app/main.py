@@ -36,6 +36,13 @@ DETECTION_INDEX_PATH = UPLOAD_DIR / "bag_detection_frames.json"
 MONITOR_STATE_PATH = UPLOAD_DIR / "rtsp_monitor_state.json"
 DETECTION_FRAME_DIR = UPLOAD_DIR / "detections"
 MODEL_PATH = BASE_DIR / "models" / "best.pt"
+# Обученная модель, положенная в data/uploads, имеет приоритет над моделью из
+# образа: так её можно доставить на объект без пересборки.
+MODEL_OVERRIDE_PATH = UPLOAD_DIR / "best.pt"
+
+
+def resolve_model_path() -> Path:
+    return MODEL_OVERRIDE_PATH if MODEL_OVERRIDE_PATH.exists() else MODEL_PATH
 STREAM_NAME = "teststream"
 PUBLIC_RTSP_URL = f"rtsp://localhost:8554/{STREAM_NAME}"
 INTERNAL_RTSP_URL = f"rtsp://mediamtx:8554/{STREAM_NAME}"
@@ -1953,7 +1960,7 @@ class DualRtspMonitorManager:
                     f"Можно одновременно анализировать не более {self.monitor_limit} RTSP-потоков."
                 )
 
-        analytics_instance = BagAnalyticsManager(model_path=self.model_path)
+        analytics_instance = BagAnalyticsManager(model_path=resolve_model_path())
         if self.detections is not None:
             archive = self.detections
             captured_stream = dict(stream)

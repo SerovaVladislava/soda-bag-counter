@@ -47,7 +47,7 @@ SAMPLE_LOG_NAME = "zone_samples.csv"
 SAMPLE_LOG_MAX_BYTES = 25 * 1024 * 1024
 SAMPLE_LOG_HEADER = (
     "time_utc,fill,control,baseline,present,committed,state,"
-    "pending_hits,pending_seconds,suppressed,stalled,count,motion,solid\n"
+    "pending_hits,pending_seconds,suppressed,stalled,count,motion,solid,det\n"
 )
 
 DETECTION_CAPTURE_WIDTH = 1280
@@ -97,6 +97,18 @@ ZONE_SATURATION_MAX = 60
 ZONE_PROFILE_BINS = 64
 ZONE_COLUMN_LIGHT_MIN = 0.5
 ZONE_SOLID_MIN = 0.25
+# Детектор - обученная на мешках модель (классы bag_full / bag_empty): второй,
+# независимый признак присутствия. Уверенная рамка ПОЛНОГО мешка, лежащая в
+# зоне над бункером, открывает и держит эпизод наравне с заполнением; на
+# солнце и бликах модель молчит. Включается только если у загруженной модели
+# есть класс полного мешка - у штатной необученной модели его нет, и тогда
+# всё работает по-прежнему. Запускается не чаще раза в несколько секунд:
+# YOLO11m на процессоре - около полусекунды на кадр.
+DETECTOR_FULL_LABELS = {"bag_full", "full_bag", "bag-full", "full"}
+ZONE_DETECTOR_MIN_CONF = 0.6
+ZONE_DETECTOR_MIN_OVERLAP = 0.3
+ZONE_DETECTOR_PERIOD_SECONDS = 4.0
+DETECTOR_IMGSZ = 640
 ZONE_FILL_ENTER = 0.21
 ZONE_FILL_STAY = 0.17
 # Верхняя граница: заполнение под единицу означает объект вплотную к
@@ -248,6 +260,7 @@ class ZoneObservation:
     state: str
     candidate: BagCandidate | None
     solid: float = 0.0
+    detector: float | None = None
 
 
 def _zone_solid_columns(
@@ -340,6 +353,7 @@ class HopperZoneEpisodeCounter:
         control_ratio: float = ZONE_CONTROL_EXCESS_RATIO,
         solid_min: float = ZONE_SOLID_MIN,
         column_light_min: float = ZONE_COLUMN_LIGHT_MIN,
+        detector_min_conf: float = ZONE_DETECTOR_MIN_CONF,
         baseline_window: int = ZONE_BASELINE_WINDOW,
         baseline_percentile: float = ZONE_BASELINE_PERCENTILE,
         baseline_min_samples: int = ZONE_BASELINE_MIN_SAMPLES,
@@ -368,6 +382,7 @@ class HopperZoneEpisodeCounter:
         self.control_ratio = max(float(control_ratio), 0.0)
         self.solid_min = min(max(float(solid_min), 0.0), 1.0)
         self.column_light_min = min(max(float(column_light_min), 0.0), 1.0)
+        self.detector_min_conf = min(max(float(detector_min_conf), 0.0), 1.0)
         self.baseline_percentile = float(baseline_percentile)
         self.baseline_min_samples = max(int(baseline_min_samples), 1)
         self.baseline_margin = float(baseline_margin)
@@ -391,6 +406,7 @@ class HopperZoneEpisodeCounter:
         self.last_control_fill = 0.0
         self.last_baseline = 0.0
         self.last_solid = 0.0
+        self.last_detector: float | None = None
         self.present_samples = 0
         self.pending_hits = 0
 
@@ -490,7 +506,13 @@ class HopperZoneEpisodeCounter:
         while self._commit_timestamps and self._commit_timestamps[-1] > timestamp:
             self._commit_timestamps.pop()
 
-    def observe(self, frame: Any, frame_position: int, timestamp: float) -> ZoneObservation:
+    def observe(
+        self,
+        frame: Any,
+        frame_position: int,
+        timestamp: float,
+        detector_conf: float | None = None,
+    ) -> ZoneObservation:
         self._track_spacing(timestamp)
         fill = _zone_fill(frame, self.zone, self.gray_level, self.saturation_max)
         control_fill = (
@@ -529,6 +551,11 @@ class HopperZoneEpisodeCounter:
         # baseline_min_samples проб, до этого поправка равна нулю.
         threshold = max(threshold, baseline + self.baseline_margin)
         present = fill >= threshold
+        detector_hit = (
+            detector_conf is not None
+            and self.detector_min_conf > 0.0
+            and detector_conf >= self.detector_min_conf
+        )
         # Первая минута после запуска: базовой линии ещё нет, а абсолютный
         # порог днём ниже уровня пустой зоны (пустая зона держит 0.15-0.35,
         # порог 0.21). Без базовой линии пустая зона выглядела бы мешком,
@@ -536,6 +563,7 @@ class HopperZoneEpisodeCounter:
         # пополняется - замок на полчаса и ложный засчёт при каждом запуске.
         if len(self._fills) < self.baseline_min_samples:
             present = False
+            detector_hit = False
         # Прирост зоны против прироста контрольной зоны.
         if present and self.control_ratio > 0.0 and control_baseline is not None:
             control_excess = max(control_fill - control_baseline, 0.0)
@@ -556,9 +584,15 @@ class HopperZoneEpisodeCounter:
         # бункером: кран несёт мешок мимо камеры.
         if present and 0.0 < self.fill_max < 1.0:
             present = fill <= self.fill_max
+        # Уверенная рамка полного мешка в зоне - присутствие сама по себе: и
+        # для открытия эпизода, и для удержания, и для засчёта.
+        if detector_hit:
+            present = True
 
         self._update_stuck_suppression(fill=fill, timestamp=timestamp)
-        commit_allowed = (not self._suppressed_until_clear) and fill >= baseline + self.baseline_margin
+        commit_allowed = (not self._suppressed_until_clear) and (
+            fill >= baseline + self.baseline_margin or detector_hit
+        )
         committed = False
 
         if self.state == "active":
@@ -619,6 +653,7 @@ class HopperZoneEpisodeCounter:
         self.last_baseline = baseline
         self.last_control_baseline = control_baseline
         self.last_solid = solid
+        self.last_detector = detector_conf
         if present:
             self.present_samples += 1
 
@@ -633,6 +668,7 @@ class HopperZoneEpisodeCounter:
             state=self.state,
             candidate=self._build_candidate(frame=frame, frame_position=frame_position, fill=fill),
             solid=float(solid),
+            detector=(float(detector_conf) if detector_conf is not None else None),
         )
 
     def finish(self) -> None:
@@ -770,6 +806,7 @@ class BagAnalyticsManager:
         zone_control_ratio: float = ZONE_CONTROL_EXCESS_RATIO,
         zone_solid_min: float = ZONE_SOLID_MIN,
         zone_column_light_min: float = ZONE_COLUMN_LIGHT_MIN,
+        zone_detector_min_conf: float = ZONE_DETECTOR_MIN_CONF,
         zone_baseline_window: int = ZONE_BASELINE_WINDOW,
         zone_baseline_percentile: float = ZONE_BASELINE_PERCENTILE,
         zone_baseline_min_samples: int = ZONE_BASELINE_MIN_SAMPLES,
@@ -835,6 +872,11 @@ class BagAnalyticsManager:
         self.zone_control_ratio = max(float(zone_control_ratio), 0.0)
         self.zone_solid_min = min(max(float(zone_solid_min), 0.0), 1.0)
         self.zone_column_light_min = min(max(float(zone_column_light_min), 0.0), 1.0)
+        self.zone_detector_min_conf = min(max(float(zone_detector_min_conf), 0.0), 1.0)
+        self.detector_period_seconds = float(ZONE_DETECTOR_PERIOD_SECONDS)
+        self.detector_class_id: int | None = None
+        self.detector_enabled = False
+        self.detector_seconds: float | None = None
         self.zone_baseline_window = max(int(zone_baseline_window), 1)
         self.zone_baseline_percentile = float(zone_baseline_percentile)
         self.zone_baseline_min_samples = max(int(zone_baseline_min_samples), 1)
@@ -878,6 +920,7 @@ class BagAnalyticsManager:
         self.last_zone_control_fill: float | None = None
         self.last_zone_control_baseline: float | None = None
         self.last_zone_solid: float | None = None
+        self.last_zone_detector: float | None = None
         self.stall_motion: float | None = None
         self.episode_state = "idle"
 
@@ -1093,6 +1136,9 @@ class BagAnalyticsManager:
             motion_history: deque[tuple[float, float]] = deque()
             stalled = False
             sample_log = self._open_sample_log()
+            detector_model = self._resolve_detector()
+            last_detector_t: float | None = None
+            last_detector_conf: float | None = None
 
             while not stop_event.is_set():
                 is_sample = stream_frame_index % frame_stride == 0
@@ -1173,10 +1219,25 @@ class BagAnalyticsManager:
 
                 sampled_frame_index += 1
                 timestamp = clock.stamp(capture=capture, sequential_index=sequential_index)
+                if detector_model is not None and (
+                    last_detector_t is None
+                    or timestamp - last_detector_t >= self.detector_period_seconds
+                ):
+                    detect_started = time.monotonic()
+                    last_detector_conf = self._detect_full_bag(detector_model, frame)
+                    last_detector_t = timestamp
+                    # Слабый процессор: период подстраивается так, чтобы детектор
+                    # занимал не больше трети времени цикла.
+                    detect_seconds = time.monotonic() - detect_started
+                    self.detector_period_seconds = max(
+                        float(ZONE_DETECTOR_PERIOD_SECONDS), min(3.0 * detect_seconds, 20.0)
+                    )
+                    self.detector_seconds = detect_seconds
                 observation = counter.observe(
                     frame=frame,
                     frame_position=sequential_index,
                     timestamp=timestamp,
+                    detector_conf=last_detector_conf,
                 )
 
                 recent_presence.append(1 if observation.present else 0)
@@ -1252,6 +1313,7 @@ class BagAnalyticsManager:
                     self.last_zone_control_fill = float(observation.control_fill)
                     self.last_zone_control_baseline = counter.last_control_baseline
                     self.last_zone_solid = float(observation.solid)
+                    self.last_zone_detector = observation.detector
                     self.episode_state = counter.state
                     self.completed_at = None
                     self.last_result_at = datetime.now(timezone.utc)
@@ -1457,6 +1519,49 @@ class BagAnalyticsManager:
                 ]
             return self.model
 
+    def _resolve_detector(self) -> YOLO | None:
+        """Модель с классом полного мешка; иначе детектор выключен."""
+        try:
+            model = self._get_model()
+        except Exception:
+            self.detector_enabled = False
+            return None
+        names = self._normalize_names(getattr(model, "names", {}))
+        class_id = next(
+            (cid for cid, name in names.items() if str(name).strip().lower() in DETECTOR_FULL_LABELS),
+            None,
+        )
+        with self.lock:
+            self.detector_class_id = class_id
+            self.detector_enabled = class_id is not None and self.zone_detector_min_conf > 0.0
+        return model if self.detector_enabled else None
+
+    def _detect_full_bag(self, model: YOLO, frame: Any) -> float:
+        """Лучшая уверенность рамки полного мешка, лежащей в зоне над бункером."""
+        try:
+            results = model.predict(
+                source=frame, conf=0.25, imgsz=DETECTOR_IMGSZ, device="cpu", verbose=False,
+            )
+        except Exception:
+            return 0.0
+        result = results[0] if results else None
+        if result is None or getattr(result, "boxes", None) is None or len(result.boxes) == 0:
+            return 0.0
+        frame_height, frame_width = frame.shape[:2]
+        zx1, zy1, zx2, zy2 = _zone_bounds(frame_width, frame_height, self.zone_above_hopper)
+        best = 0.0
+        boxes = result.boxes
+        classes = boxes.cls.tolist() if getattr(boxes, "cls", None) is not None else []
+        for index, (box, confidence) in enumerate(zip(boxes.xyxy.tolist(), boxes.conf.tolist())):
+            if index < len(classes) and int(classes[index]) != self.detector_class_id:
+                continue
+            x1, y1, x2, y2 = box
+            inter = max(0.0, min(x2, zx2) - max(x1, zx1)) * max(0.0, min(y2, zy2) - max(y1, zy1))
+            area = max((x2 - x1) * (y2 - y1), 1.0)
+            if inter / area >= ZONE_DETECTOR_MIN_OVERLAP:
+                best = max(best, float(confidence))
+        return best
+
     def _load_class_names(self) -> dict[int, str]:
         try:
             model = self._get_model()
@@ -1476,6 +1581,7 @@ class BagAnalyticsManager:
             control_ratio=self.zone_control_ratio,
             solid_min=self.zone_solid_min,
             column_light_min=self.zone_column_light_min,
+            detector_min_conf=self.zone_detector_min_conf,
             baseline_window=self.zone_baseline_window,
             baseline_percentile=self.zone_baseline_percentile,
             baseline_min_samples=self.zone_baseline_min_samples,
@@ -1807,7 +1913,7 @@ class BagAnalyticsManager:
     ) -> Any:
         try:
             handle.write(
-                "%s,%.4f,%.4f,%.4f,%d,%d,%s,%d,%.1f,%d,%d,%d,%s,%.3f\n"
+                "%s,%.4f,%.4f,%.4f,%d,%d,%s,%d,%.1f,%d,%d,%d,%s,%.3f,%s\n"
                 % (
                     datetime.now(timezone.utc).isoformat(timespec="seconds"),
                     observation.fill,
@@ -1823,6 +1929,7 @@ class BagAnalyticsManager:
                     int(counter.count),
                     "" if motion is None else "%.4f" % motion,
                     float(observation.solid),
+                    "" if observation.detector is None else "%.2f" % observation.detector,
                 )
             )
             handle.flush()
@@ -3439,6 +3546,12 @@ class BagAnalyticsManager:
                 "baseline_margin": float(getattr(self, "zone_baseline_margin", ZONE_BASELINE_MARGIN)),
                 "control_excess_ratio": float(getattr(self, "zone_control_ratio", ZONE_CONTROL_EXCESS_RATIO)),
                 "solid_min": float(getattr(self, "zone_solid_min", ZONE_SOLID_MIN)),
+                "detector_min_conf": float(getattr(self, "zone_detector_min_conf", ZONE_DETECTOR_MIN_CONF)),
+                "detector_enabled": bool(getattr(self, "detector_enabled", False)),
+                "detector_period_seconds": round(float(getattr(self, "detector_period_seconds", ZONE_DETECTOR_PERIOD_SECONDS)), 1),
+                "detector_seconds": (
+                    round(float(self.detector_seconds), 2) if getattr(self, "detector_seconds", None) is not None else None
+                ),
                 "zone": [float(v) for v in getattr(self, "zone_above_hopper", ZONE_ABOVE_HOPPER)],
                 "control_zone": [float(v) for v in getattr(self, "zone_control", ZONE_CONTROL)],
             },
@@ -3455,6 +3568,11 @@ class BagAnalyticsManager:
             "zone_solid": (
                 round(float(self.last_zone_solid), 3)
                 if getattr(self, "last_zone_solid", None) is not None
+                else None
+            ),
+            "zone_detector": (
+                round(float(self.last_zone_detector), 3)
+                if getattr(self, "last_zone_detector", None) is not None
                 else None
             ),
             "zone_fill": (
