@@ -30,6 +30,10 @@ FFMPEG_LOG_PATH = UPLOAD_DIR / "ffmpeg.log"
 RTSP_HISTORY_PATH = UPLOAD_DIR / "rtsp_stream_history.json"
 SHIFT_HISTORY_PATH = UPLOAD_DIR / "bag_shift_history.json"
 DETECTION_INDEX_PATH = UPLOAD_DIR / "bag_detection_frames.json"
+# Какие мониторы работали: после перезапуска сервера (перезагрузка ПК,
+# рестарт Docker) они поднимаются сами. Без этого счёт молчит, пока кто-то
+# не нажмёт «Анализировать» - на объекте так пропало шесть суток.
+MONITOR_STATE_PATH = UPLOAD_DIR / "rtsp_monitor_state.json"
 DETECTION_FRAME_DIR = UPLOAD_DIR / "detections"
 MODEL_PATH = BASE_DIR / "models" / "best.pt"
 STREAM_NAME = "teststream"
@@ -1810,14 +1814,47 @@ class DualRtspMonitorManager:
         model_path: Path,
         monitor_limit: int = RTSP_MONITOR_LIMIT,
         detections: DetectionFrameArchive | None = None,
+        state_path: Path | None = None,
     ) -> None:
         self.registry = registry
         self.history = history
         self.model_path = model_path
         self.detections = detections
+        self.state_path = state_path
         self.monitor_limit = max(int(monitor_limit), 1)
         self.lock = threading.Lock()
         self.sessions: dict[str, dict[str, Any]] = {}
+
+    def _save_state_locked(self) -> None:
+        if self.state_path is None:
+            return
+        try:
+            payload = {
+                "active": sorted(self.sessions.keys()),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            tmp = self.state_path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp.replace(self.state_path)
+        except Exception:
+            pass
+
+    def resume(self) -> list[str]:
+        """Поднимает мониторы, которые работали до перезапуска сервера."""
+        if self.state_path is None or not self.state_path.exists():
+            return []
+        try:
+            payload = json.loads(self.state_path.read_text(encoding="utf-8") or "{}")
+        except Exception:
+            return []
+        resumed: list[str] = []
+        for stream_id in payload.get("active") or []:
+            try:
+                self.start(str(stream_id))
+                resumed.append(str(stream_id))
+            except Exception as exc:  # noqa: BLE001
+                print(f"Мониторинг {stream_id} не возобновлён: {exc}")
+        return resumed
 
     def lookup_stream(self, stream_id: str) -> dict[str, str] | None:
         normalized_stream_id = (stream_id or "").strip()
@@ -1949,6 +1986,7 @@ class DualRtspMonitorManager:
 
         with self.lock:
             self.sessions[normalized_stream_id] = session
+            self._save_state_locked()
 
         collector_thread.start()
         return self.status()
@@ -1958,12 +1996,17 @@ class DualRtspMonitorManager:
         stream_id: str | None = None,
         *,
         ignore_missing: bool = False,
+        persist: bool = True,
     ) -> tuple[bool, str]:
+        """persist=False - остановка при выключении сервера: состояние не трогаем,
+        чтобы после перезапуска мониторы поднялись снова."""
         normalized_stream_id = (stream_id or "").strip() or None
 
         if normalized_stream_id is not None:
             with self.lock:
                 session = self.sessions.pop(normalized_stream_id, None)
+                if session is not None and persist:
+                    self._save_state_locked()
             if session is None:
                 if ignore_missing:
                     return False, "Мониторинг RTSP-потока не запущен."
@@ -1976,6 +2019,8 @@ class DualRtspMonitorManager:
         with self.lock:
             sessions = list(self.sessions.values())
             self.sessions = {}
+            if sessions and persist:
+                self._save_state_locked()
 
         if not sessions:
             if ignore_missing:
@@ -1987,7 +2032,7 @@ class DualRtspMonitorManager:
         return True, "Мониторинг всех RTSP-потоков остановлен."
 
     def shutdown(self) -> None:
-        self.stop(ignore_missing=True)
+        self.stop(ignore_missing=True, persist=False)
 
     def status(self) -> dict[str, Any]:
         with self.lock:
@@ -2144,6 +2189,7 @@ rtsp_monitor = DualRtspMonitorManager(
     history=bag_shift_history,
     model_path=MODEL_PATH,
     detections=detection_archive,
+    state_path=MONITOR_STATE_PATH,
 )
 
 
@@ -2170,6 +2216,12 @@ async def lifespan(_: FastAPI):
     rtsp_history.ensure_storage()
     bag_shift_history.ensure_storage()
     detection_archive.ensure_storage()
+    try:
+        resumed = rtsp_monitor.resume()
+        if resumed:
+            print(f"Мониторинг возобновлён после перезапуска: {', '.join(resumed)}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"Автовозобновление мониторинга не удалось: {exc}")
     try:
         yield
     finally:
