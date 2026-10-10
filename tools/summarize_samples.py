@@ -33,6 +33,54 @@ def parse_time(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(LOCAL)
 
 
+DET_SHOW = 0.35          # с какой уверенности рамка модели попадает в сводку
+DET_COUNT = 0.6          # ZONE_DETECTOR_MIN_CONF - засчитываемая уверенность
+DET_OVERLAP = 0.3        # ZONE_DETECTOR_MIN_OVERLAP - доля рамки в зоне
+
+
+def detector_section(rows) -> None:
+    """Что видела модель, даже если счёт этого не засчитал."""
+    seen = [r for r in rows if r.get("det_any") is not None and r["det_any"] >= DET_SHOW]
+    if not any(r.get("det_any") is not None for r in rows):
+        return
+    print()
+    if not seen:
+        print(f"Детектор: модель ни разу не увидела мешок с уверенностью от {DET_SHOW}.")
+        return
+    groups, current = [], None
+    for r in seen:
+        if current and (r["t"] - current["last"]).total_seconds() <= GAP_SECONDS and r["det_cls"] == current["cls"]                 and abs((r["det_cx"] or 0) - current["cx"]) <= 0.15:
+            current["last"] = r["t"]
+            current["n"] += 1
+            current["peak"] = max(current["peak"], r["det_any"])
+            current["ov"] = max(current["ov"], r["det_ov"] or 0.0)
+            current["committed"] |= r["committed"]
+        else:
+            if current:
+                groups.append(current)
+            current = {"start": r["t"], "last": r["t"], "n": 1, "cls": r["det_cls"], "peak": r["det_any"],
+                       "cx": r["det_cx"] or 0.0, "cy": r["det_cy"] or 0.0, "ov": r["det_ov"] or 0.0,
+                       "committed": r["committed"]}
+    groups.append(current)
+    print(f"Детектор: модель видела мешок {len(groups)} раз (уверенность от {DET_SHOW}; рамка засчитывается от {DET_COUNT} и при доле в зоне от {DET_OVERLAP})")
+    print(f"{'начало':>14} {'длит.':>7} {'класс':>10} {'уверен.':>7} {'центр x,y':>11} {'в зоне':>6}  вывод")
+    for g in groups[:80]:
+        dur = (g["last"] - g["start"]).total_seconds()
+        if g["committed"]:
+            verdict = "засчитан"
+        elif g["ov"] < DET_OVERLAP:
+            verdict = "вне зоны над бункером"
+        elif g["peak"] < DET_COUNT:
+            verdict = f"в зоне, но уверенность ниже {DET_COUNT}"
+        elif g["cls"] != "bag_full":
+            verdict = "в зоне, но класс не bag_full"
+        else:
+            verdict = "в зоне и уверенно - разобрать по кадрам"
+        print(f"{g['start']:%d.%m %H:%M:%S} {dur:>6.0f}с {g['cls']:>10} {g['peak']:>7.2f} {g['cx']:>5.2f},{g['cy']:<5.2f} {g['ov']:>6.2f}  {verdict}")
+    if len(groups) > 80:
+        print(f"  ... и ещё {len(groups) - 80}")
+
+
 def main() -> int:
     if not LOG.exists():
         print(f"Журнал не найден: {LOG}")
@@ -56,6 +104,11 @@ def main() -> int:
                         "count": int(raw["count"]),
                         "solid": float(raw["solid"]) if raw.get("solid") else None,
                         "det": float(raw["det"]) if raw.get("det") else None,
+                        "det_any": float(raw["det_any"]) if raw.get("det_any") else None,
+                        "det_cls": raw.get("det_cls") or "",
+                        "det_cx": float(raw["det_cx"]) if raw.get("det_cx") else None,
+                        "det_cy": float(raw["det_cy"]) if raw.get("det_cy") else None,
+                        "det_ov": float(raw["det_ov"]) if raw.get("det_ov") else None,
                     }
                 )
             except (KeyError, ValueError):
@@ -115,6 +168,8 @@ def main() -> int:
             current["committed"] = True
     if current:
         events.append(current)
+
+    detector_section(rows)
 
     print()
     if not events:

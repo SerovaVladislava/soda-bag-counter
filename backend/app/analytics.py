@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 import os
+import shutil
 import threading
 import time
 from collections import Counter, deque
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from collections.abc import Callable
@@ -47,7 +49,8 @@ SAMPLE_LOG_NAME = "zone_samples.csv"
 SAMPLE_LOG_MAX_BYTES = 25 * 1024 * 1024
 SAMPLE_LOG_HEADER = (
     "time_utc,fill,control,baseline,present,committed,state,"
-    "pending_hits,pending_seconds,suppressed,stalled,count,motion,solid,det\n"
+    "pending_hits,pending_seconds,suppressed,stalled,count,motion,solid,det,"
+    "det_any,det_cls,det_cx,det_cy,det_ov\n"
 )
 
 DETECTION_CAPTURE_WIDTH = 1280
@@ -109,6 +112,31 @@ ZONE_DETECTOR_MIN_CONF = 0.6
 ZONE_DETECTOR_MIN_OVERLAP = 0.3
 ZONE_DETECTOR_PERIOD_SECONDS = 4.0
 DETECTOR_IMGSZ = 640
+# Диагностика детектора. Журнал пишет не только итог проверки «полный мешок в
+# зоне», но и лучшую рамку модели в любом месте кадра: класс, уверенность,
+# центр и долю рамки в зоне. Кадры, где модель видит мешок, сохраняются сами
+# (с рамками и зоной) - по ним видно, где в нынешнем ракурсе висит мешок и
+# почему счёт его принял или отверг. Сохранение - при каждом изменении
+# картины, но не чаще раза в 15 с; неподвижные мешки на полу - раз в 5 минут.
+DETECTOR_SNAPSHOT_DIR = "detector_frames"
+DETECTOR_SNAPSHOT_MIN_CONF = 0.35
+DETECTOR_SNAPSHOT_MIN_GAP_SECONDS = 15.0
+DETECTOR_SNAPSHOT_HEARTBEAT_SECONDS = 300.0
+DETECTOR_SNAPSHOT_DAILY_LIMIT = 300
+DETECTOR_SNAPSHOT_KEEP_DAYS = 7
+DETECTOR_SNAPSHOT_WIDTH = 960
+DETECTOR_SNAPSHOT_MOVE = 0.05
+# Настройка на месте без обновления кода: zone_config.json рядом с журналом
+# проб. Читается при каждом запуске монитора («Анализировать» или перезапуск
+# сервера). Ошибка в файле - действуют настройки по умолчанию, причина видна
+# в статусе (config_error).
+ZONE_CONFIG_NAME = "zone_config.json"
+try:
+    from zoneinfo import ZoneInfo
+
+    DETECTOR_LOCAL_TZ = ZoneInfo("Asia/Yekaterinburg")
+except Exception:  # noqa: BLE001
+    DETECTOR_LOCAL_TZ = timezone(timedelta(hours=5))
 ZONE_FILL_ENTER = 0.21
 ZONE_FILL_STAY = 0.17
 # Верхняя граница: заполнение под единицу означает объект вплотную к
@@ -874,9 +902,20 @@ class BagAnalyticsManager:
         self.zone_column_light_min = min(max(float(zone_column_light_min), 0.0), 1.0)
         self.zone_detector_min_conf = min(max(float(zone_detector_min_conf), 0.0), 1.0)
         self.detector_period_seconds = float(ZONE_DETECTOR_PERIOD_SECONDS)
-        self.detector_class_id: int | None = None
+        self.detector_class_ids: set[int] = set()
+        self.detector_names: dict[int, str] = {}
+        self.detector_labels: set[str] = set(DETECTOR_FULL_LABELS)
+        self.detector_imgsz = int(DETECTOR_IMGSZ)
+        self.detector_min_overlap = float(ZONE_DETECTOR_MIN_OVERLAP)
         self.detector_enabled = False
         self.detector_seconds: float | None = None
+        self.config_source: str | None = None
+        self.config_error: str | None = None
+        self.detector_frames_today = 0
+        self._snapshot_day: str | None = None
+        self._snapshot_last_t: float | None = None
+        self._snapshot_last_set: list[tuple[str, float, float]] = []
+        self._snapshot_last_cleanup: float | None = None
         self.zone_baseline_window = max(int(zone_baseline_window), 1)
         self.zone_baseline_percentile = float(zone_baseline_percentile)
         self.zone_baseline_min_samples = max(int(zone_baseline_min_samples), 1)
@@ -1102,6 +1141,7 @@ class BagAnalyticsManager:
             if capture is None:
                 return
 
+            self._apply_zone_config()
             counter = self._build_zone_counter()
             sample_period = float(self.zone_sample_period_seconds)
             fps_effective, fps_source = self._resolve_capture_fps(
@@ -1139,6 +1179,8 @@ class BagAnalyticsManager:
             detector_model = self._resolve_detector()
             last_detector_t: float | None = None
             last_detector_conf: float | None = None
+            last_detections: list[dict[str, Any]] = []
+            detector_fresh = False
 
             while not stop_event.is_set():
                 is_sample = stream_frame_index % frame_stride == 0
@@ -1224,8 +1266,9 @@ class BagAnalyticsManager:
                     or timestamp - last_detector_t >= self.detector_period_seconds
                 ):
                     detect_started = time.monotonic()
-                    last_detector_conf = self._detect_full_bag(detector_model, frame)
+                    last_detector_conf, last_detections = self._run_detector(detector_model, frame)
                     last_detector_t = timestamp
+                    detector_fresh = True
                     # Слабый процессор: период подстраивается так, чтобы детектор
                     # занимал не больше трети времени цикла.
                     detect_seconds = time.monotonic() - detect_started
@@ -1239,6 +1282,13 @@ class BagAnalyticsManager:
                     timestamp=timestamp,
                     detector_conf=last_detector_conf,
                 )
+
+                if detector_fresh or (detector_model is not None and observation.committed):
+                    self._maybe_save_detector_frame(
+                        frame, last_detections, observation, counter,
+                        timestamp=timestamp, force=bool(observation.committed),
+                    )
+                    detector_fresh = False
 
                 recent_presence.append(1 if observation.present else 0)
                 if len(recent_presence) > self.live_history_size:
@@ -1281,6 +1331,7 @@ class BagAnalyticsManager:
                         counter=counter,
                         stalled=stalled,
                         motion=motion_median,
+                        detections=last_detections if detector_model is not None else None,
                     )
 
                 with self.lock:
@@ -1527,40 +1578,224 @@ class BagAnalyticsManager:
             self.detector_enabled = False
             return None
         names = self._normalize_names(getattr(model, "names", {}))
-        class_id = next(
-            (cid for cid, name in names.items() if str(name).strip().lower() in DETECTOR_FULL_LABELS),
-            None,
-        )
+        labels = {str(label).strip().lower() for label in self.detector_labels}
+        class_ids = {cid for cid, name in names.items() if str(name).strip().lower() in labels}
         with self.lock:
-            self.detector_class_id = class_id
-            self.detector_enabled = class_id is not None and self.zone_detector_min_conf > 0.0
+            self.detector_names = names
+            self.detector_class_ids = class_ids
+            self.detector_enabled = bool(class_ids) and self.zone_detector_min_conf > 0.0
         return model if self.detector_enabled else None
 
-    def _detect_full_bag(self, model: YOLO, frame: Any) -> float:
-        """Лучшая уверенность рамки полного мешка, лежащей в зоне над бункером."""
+    def _run_detector(self, model: YOLO, frame: Any) -> tuple[float, list[dict[str, Any]]]:
+        """Все рамки модели на кадре и лучшая уверенность засчитываемой рамки в зоне."""
         try:
             results = model.predict(
-                source=frame, conf=0.25, imgsz=DETECTOR_IMGSZ, device="cpu", verbose=False,
+                source=frame, conf=0.25, imgsz=self.detector_imgsz, device="cpu", verbose=False,
             )
         except Exception:
-            return 0.0
+            return 0.0, []
         result = results[0] if results else None
         if result is None or getattr(result, "boxes", None) is None or len(result.boxes) == 0:
-            return 0.0
+            return 0.0, []
         frame_height, frame_width = frame.shape[:2]
         zx1, zy1, zx2, zy2 = _zone_bounds(frame_width, frame_height, self.zone_above_hopper)
         best = 0.0
+        detections: list[dict[str, Any]] = []
         boxes = result.boxes
         classes = boxes.cls.tolist() if getattr(boxes, "cls", None) is not None else []
         for index, (box, confidence) in enumerate(zip(boxes.xyxy.tolist(), boxes.conf.tolist())):
-            if index < len(classes) and int(classes[index]) != self.detector_class_id:
-                continue
-            x1, y1, x2, y2 = box
+            class_id = int(classes[index]) if index < len(classes) else -1
+            x1, y1, x2, y2 = (float(v) for v in box)
             inter = max(0.0, min(x2, zx2) - max(x1, zx1)) * max(0.0, min(y2, zy2) - max(y1, zy1))
-            area = max((x2 - x1) * (y2 - y1), 1.0)
-            if inter / area >= ZONE_DETECTOR_MIN_OVERLAP:
+            overlap = inter / max((x2 - x1) * (y2 - y1), 1.0)
+            counts = class_id in self.detector_class_ids
+            detections.append(
+                {
+                    "cls": str(self.detector_names.get(class_id, class_id)),
+                    "conf": float(confidence),
+                    "box": (x1, y1, x2, y2),
+                    "cx": (x1 + x2) / 2.0 / max(frame_width, 1),
+                    "cy": (y1 + y2) / 2.0 / max(frame_height, 1),
+                    "ov": overlap,
+                    "counts": counts,
+                }
+            )
+            if counts and overlap >= self.detector_min_overlap:
                 best = max(best, float(confidence))
-        return best
+        return best, detections
+
+    def _detect_full_bag(self, model: YOLO, frame: Any) -> float:
+        """Лучшая уверенность засчитываемой рамки в зоне над бункером."""
+        return self._run_detector(model, frame)[0]
+
+    def _apply_zone_config(self) -> None:
+        """Зона и пороги из zone_config.json - для настройки на месте без кода."""
+        self.config_source = None
+        self.config_error = None
+        path = Path(SAMPLE_LOG_DIR) / ZONE_CONFIG_NAME
+        if not path.is_file():
+            return
+        allowed = {
+            "zone", "control_zone", "detector_min_conf", "detector_min_overlap",
+            "detector_imgsz", "detector_labels", "solid_min", "baseline_margin",
+            "min_present_seconds",
+        }
+        ranges = {
+            "detector_min_conf": (0.05, 0.99),
+            "detector_min_overlap": (0.0, 1.0),
+            "solid_min": (0.0, 1.0),
+            "baseline_margin": (0.0, 0.5),
+            "min_present_seconds": (2.0, 120.0),
+        }
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8-sig") or "{}")
+            if not isinstance(raw, dict):
+                raise ValueError("ожидается объект в фигурных скобках")
+            unknown = sorted(set(raw) - allowed)
+            if unknown:
+                raise ValueError("неизвестные ключи: " + ", ".join(unknown))
+            updates: dict[str, Any] = {}
+            for key in ("zone", "control_zone"):
+                if key in raw:
+                    box = tuple(float(v) for v in raw[key])
+                    if len(box) != 4 or not (0.0 <= box[0] < box[2] <= 1.0 and 0.0 <= box[1] < box[3] <= 1.0):
+                        raise ValueError(f"{key}: нужны четыре доли кадра x1, y1, x2, y2, x1 < x2, y1 < y2")
+                    updates[key] = box
+            for key, (low, high) in ranges.items():
+                if key in raw:
+                    value = float(raw[key])
+                    if not low <= value <= high:
+                        raise ValueError(f"{key}: допустимо от {low} до {high}")
+                    updates[key] = value
+            if "detector_imgsz" in raw:
+                imgsz = int(raw["detector_imgsz"])
+                if not 320 <= imgsz <= 1920 or imgsz % 32:
+                    raise ValueError("detector_imgsz: от 320 до 1920, кратно 32")
+                updates["detector_imgsz"] = imgsz
+            if "detector_labels" in raw:
+                labels = {str(v).strip().lower() for v in raw["detector_labels"] if str(v).strip()}
+                if not labels:
+                    raise ValueError("detector_labels: пустой список")
+                updates["detector_labels"] = labels
+        except Exception as exc:  # noqa: BLE001
+            self.config_error = f"{ZONE_CONFIG_NAME}: {exc} - действуют настройки по умолчанию"
+            return
+        targets = {
+            "zone": "zone_above_hopper",
+            "control_zone": "zone_control",
+            "detector_min_conf": "zone_detector_min_conf",
+            "detector_min_overlap": "detector_min_overlap",
+            "detector_imgsz": "detector_imgsz",
+            "detector_labels": "detector_labels",
+            "solid_min": "zone_solid_min",
+            "baseline_margin": "zone_baseline_margin",
+            "min_present_seconds": "zone_min_present_seconds",
+        }
+        for key, value in updates.items():
+            setattr(self, targets[key], value)
+        self.config_source = str(path)
+
+    def _maybe_save_detector_frame(
+        self,
+        frame: Any,
+        detections: list[dict[str, Any]],
+        observation: ZoneObservation,
+        counter: HopperZoneEpisodeCounter,
+        timestamp: float,
+        force: bool = False,
+    ) -> None:
+        """Кадр с рамками модели - при изменении картины, не чаще раза в 15 с
+        времени потока; кадр засчёта сохраняется всегда."""
+        try:
+            shown = [d for d in detections if d["conf"] >= DETECTOR_SNAPSHOT_MIN_CONF]
+            if frame is None or (not shown and not force):
+                return
+            now = float(timestamp)
+            current = [(str(d["cls"]), float(d["cx"]), float(d["cy"])) for d in shown]
+            changed = len(current) != len(self._snapshot_last_set) or any(
+                not any(
+                    cls == prev[0]
+                    and abs(cx - prev[1]) <= DETECTOR_SNAPSHOT_MOVE
+                    and abs(cy - prev[2]) <= DETECTOR_SNAPSHOT_MOVE
+                    for prev in self._snapshot_last_set
+                )
+                for cls, cx, cy in current
+            )
+            if self._snapshot_last_t is not None and not force:
+                since = now - self._snapshot_last_t
+                if since < (DETECTOR_SNAPSHOT_MIN_GAP_SECONDS if changed else DETECTOR_SNAPSHOT_HEARTBEAT_SECONDS):
+                    return
+            base = Path(SAMPLE_LOG_DIR)
+            if not base.is_dir():
+                return
+            local = datetime.now(DETECTOR_LOCAL_TZ)
+            day = local.strftime("%Y-%m-%d")
+            if day != self._snapshot_day:
+                self._snapshot_day = day
+                self.detector_frames_today = 0
+            if self.detector_frames_today >= DETECTOR_SNAPSHOT_DAILY_LIMIT:
+                return
+            directory = base / DETECTOR_SNAPSHOT_DIR / day
+            directory.mkdir(parents=True, exist_ok=True)
+            image = self._annotate_detector_frame(frame, shown, observation, counter, local)
+            top = max(shown, key=lambda d: d["conf"]) if shown else None
+            label = f"{top['cls']}-{top['conf']:.2f}" if top else "no-box"
+            suffix = "_counted" if observation.committed else ""
+            name = f"{local:%H-%M-%S}_{label}{suffix}.jpg"
+            ok, buffer = cv2.imencode(".jpg", image, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
+            if not ok:
+                return
+            (directory / name).write_bytes(buffer.tobytes())
+            self.detector_frames_today += 1
+            self._snapshot_last_t = now
+            self._snapshot_last_set = current
+            wall = time.monotonic()
+            if self._snapshot_last_cleanup is None or wall - self._snapshot_last_cleanup >= 3600.0:
+                self._snapshot_last_cleanup = wall
+                cutoff = (local - timedelta(days=DETECTOR_SNAPSHOT_KEEP_DAYS)).strftime("%Y-%m-%d")
+                for child in (base / DETECTOR_SNAPSHOT_DIR).iterdir():
+                    if child.is_dir() and child.name < cutoff:
+                        shutil.rmtree(child, ignore_errors=True)
+        except Exception:
+            return
+
+    def _annotate_detector_frame(
+        self,
+        frame: Any,
+        detections: list[dict[str, Any]],
+        observation: ZoneObservation,
+        counter: HopperZoneEpisodeCounter,
+        local: datetime,
+    ) -> Any:
+        frame_height, frame_width = frame.shape[:2]
+        scale = DETECTOR_SNAPSHOT_WIDTH / float(max(frame_width, 1))
+        image = cv2.resize(
+            frame,
+            (DETECTOR_SNAPSHOT_WIDTH, max(int(round(frame_height * scale)), 1)),
+            interpolation=cv2.INTER_AREA,
+        )
+        zx1, zy1, zx2, zy2 = _zone_bounds(frame_width, frame_height, self.zone_above_hopper)
+        cv2.rectangle(
+            image, (int(zx1 * scale), int(zy1 * scale)), (int(zx2 * scale), int(zy2 * scale)), (32, 128, 255), 2
+        )
+        for d in detections:
+            x1, y1, x2, y2 = (int(v * scale) for v in d["box"])
+            accepted = d["counts"] and d["ov"] >= self.detector_min_overlap and d["conf"] >= self.zone_detector_min_conf
+            colour = (60, 200, 60) if accepted else (0, 215, 255)
+            cv2.rectangle(image, (x1, y1), (x2, y2), colour, 2)
+            label = f"{d['cls']} {d['conf']:.2f} zone {d['ov']:.2f}"
+            origin = (x1 + 3, max(y1 + 18, 18))
+            cv2.putText(image, label, origin, cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 4, cv2.LINE_AA)
+            cv2.putText(image, label, origin, cv2.FONT_HERSHEY_SIMPLEX, 0.55, colour, 1, cv2.LINE_AA)
+        caption = (
+            f"{local:%d.%m %H:%M:%S}  fill {observation.fill:.2f} base {observation.baseline:.2f} "
+            f"solid {observation.solid:.2f} det {(observation.detector or 0.0):.2f}  "
+            f"{counter.state}  count {counter.count}"
+        )
+        height = image.shape[0]
+        cv2.rectangle(image, (0, height - 26), (DETECTOR_SNAPSHOT_WIDTH, height), (0, 0, 0), -1)
+        cv2.putText(image, caption, (6, height - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
+        return image
 
     def _load_class_names(self) -> dict[int, str]:
         try:
@@ -1910,10 +2145,12 @@ class BagAnalyticsManager:
         counter: HopperZoneEpisodeCounter,
         stalled: bool,
         motion: float | None = None,
+        detections: list[dict[str, Any]] | None = None,
     ) -> Any:
+        best = max(detections, key=lambda d: d["conf"]) if detections else None
         try:
             handle.write(
-                "%s,%.4f,%.4f,%.4f,%d,%d,%s,%d,%.1f,%d,%d,%d,%s,%.3f,%s\n"
+                "%s,%.4f,%.4f,%.4f,%d,%d,%s,%d,%.1f,%d,%d,%d,%s,%.3f,%s,%s,%s,%s,%s,%s\n"
                 % (
                     datetime.now(timezone.utc).isoformat(timespec="seconds"),
                     observation.fill,
@@ -1930,6 +2167,11 @@ class BagAnalyticsManager:
                     "" if motion is None else "%.4f" % motion,
                     float(observation.solid),
                     "" if observation.detector is None else "%.2f" % observation.detector,
+                    "" if best is None else "%.2f" % best["conf"],
+                    "" if best is None else best["cls"],
+                    "" if best is None else "%.3f" % best["cx"],
+                    "" if best is None else "%.3f" % best["cy"],
+                    "" if best is None else "%.2f" % best["ov"],
                 )
             )
             handle.flush()
@@ -3552,9 +3794,15 @@ class BagAnalyticsManager:
                 "detector_seconds": (
                     round(float(self.detector_seconds), 2) if getattr(self, "detector_seconds", None) is not None else None
                 ),
+                "detector_imgsz": int(getattr(self, "detector_imgsz", DETECTOR_IMGSZ)),
+                "detector_min_overlap": float(getattr(self, "detector_min_overlap", ZONE_DETECTOR_MIN_OVERLAP)),
+                "detector_labels": sorted(getattr(self, "detector_labels", DETECTOR_FULL_LABELS)),
                 "zone": [float(v) for v in getattr(self, "zone_above_hopper", ZONE_ABOVE_HOPPER)],
                 "control_zone": [float(v) for v in getattr(self, "zone_control", ZONE_CONTROL)],
             },
+            "config_source": getattr(self, "config_source", None),
+            "config_error": getattr(self, "config_error", None),
+            "detector_frames_today": int(getattr(self, "detector_frames_today", 0)),
             "zone_control_fill": (
                 round(float(self.last_zone_control_fill), 4)
                 if getattr(self, "last_zone_control_fill", None) is not None
