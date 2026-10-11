@@ -51,7 +51,7 @@ SAMPLE_LOG_HEADER = (
     "time_utc,fill,control,baseline,present,committed,state,"
     "pending_hits,pending_seconds,suppressed,stalled,count,motion,solid,det,"
     "det_any,det_cls,det_cx,det_cy,det_ov,det_ov2,"
-    "z2_det,z2_present,z2_committed,z2_state,z2_count\n"
+    "z2_det,z2_present,z2_committed,z2_state,z2_count,looks,full_seen,poured,z2_poured\n"
 )
 
 DETECTION_CAPTURE_WIDTH = 1280
@@ -120,8 +120,25 @@ ZONE_DETECTOR_MIN_OVERLAP = 0.3
 # белая сода в воронке, которая заполнение испортила бы, а детектору не мешает.
 ZONE_DETECTOR_BOX: ZoneBox = (0.239, 0.000, 0.444, 0.410)
 ZONE_SECOND_BOX: ZoneBox | None = (0.645, 0.000, 0.862, 0.490)
-ZONE_DETECTOR_PERIOD_SECONDS = 4.0
+# Детектор смотрит на кадр раз в секунду: на каждой пробе (раз в 2 с) и на
+# кадре посередине между пробами, если процессор успевает - прогон модели
+# занимает не больше трети секунды (у заказчика 0.19 с). На слабом процессоре
+# период растёт сам, и детектор смотрит только на пробах.
+ZONE_DETECTOR_PERIOD_SECONDS = 1.0
+DETECTOR_MAX_SHARE = 1.0 / 3.0
 DETECTOR_IMGSZ = 640
+# Засчёт по высыпанию, как «Высыпано» в программе заказчика: за время
+# накопления мешок был виден полным, а после этого - пустым на POUR_EMPTY_LOOKS
+# взглядах детектора подряд (без полного между ними). Так засчитывается
+# выгрузка, а не мешок, который кран подержал над воронкой и унёс, и не
+# мерцание классов на отдельных кадрах. Заполнение зоны при этом только держит
+# эпизод (мостит провалы детектора), но засчёта само не даёт.
+POUR_EMPTY_LOOKS = 2
+# Полный мешок помнится столько секунд после последнего взгляда, где он
+# полный, даже если накопление сбросилось: пока мешок пустеет, модель может
+# его на время потерять. На записи 08.09.2025 - полный до 694 с, уверенности
+# нет 696-710 с, пустой с 712 с: без памяти эта выгрузка не засчитывалась.
+POUR_FULL_MEMORY_SECONDS = 60.0
 # Диагностика детектора. Журнал пишет не только итог проверки «полный мешок в
 # зоне», но и лучшую рамку модели в любом месте кадра: класс, уверенность,
 # центр и долю рамки в зоне. Кадры, где модель видит мешок, сохраняются сами
@@ -393,6 +410,7 @@ class HopperZoneEpisodeCounter:
         column_light_min: float = ZONE_COLUMN_LIGHT_MIN,
         detector_min_conf: float = ZONE_DETECTOR_MIN_CONF,
         fill_enabled: bool = True,
+        require_pour: bool = False,
         baseline_window: int = ZONE_BASELINE_WINDOW,
         baseline_percentile: float = ZONE_BASELINE_PERCENTILE,
         baseline_min_samples: int = ZONE_BASELINE_MIN_SAMPLES,
@@ -425,7 +443,12 @@ class HopperZoneEpisodeCounter:
         # Зона только по детектору (вторая воронка): заполнение там не
         # откалибровано, присутствие и засчёт - только по модели.
         self.fill_enabled = bool(fill_enabled)
+        self.require_pour = bool(require_pour)
         self._pending_full_seen = False
+        self._pending_empty_streak = 0
+        self._pending_poured = False
+        self._last_full_t: float | None = None
+        self.full_recent = False
         self.baseline_percentile = float(baseline_percentile)
         self.baseline_min_samples = max(int(baseline_min_samples), 1)
         self.baseline_margin = float(baseline_margin)
@@ -556,6 +579,7 @@ class HopperZoneEpisodeCounter:
         timestamp: float,
         detector_conf: float | None = None,
         detector_full: float | None = None,
+        detector_looks: list[tuple[float, float, float]] | None = None,
     ) -> ZoneObservation:
         self._track_spacing(timestamp)
         fill = _zone_fill(frame, self.zone, self.gray_level, self.saturation_max)
@@ -671,6 +695,7 @@ class HopperZoneEpisodeCounter:
                 self._reset_pending()
             if full_hit:
                 self._pending_full_seen = True
+            self._update_pour(detector_looks, timestamp)
             if self._first_present_t is None:
                 self._first_present_t = timestamp
             self.pending_hits += 1
@@ -684,7 +709,11 @@ class HopperZoneEpisodeCounter:
             fraction = self._pending_present / max(self._pending_total, 1)
             if (
                 commit_allowed
-                and (fill_ok or self._pending_full_seen)
+                and (
+                    self._pending_poured
+                    if self.require_pour
+                    else (fill_ok or self._pending_full_seen)
+                )
                 and self.pending_hits >= self.min_present_hits
                 and present_span >= self.min_present_seconds
                 and fraction >= self.pending_min_fraction
@@ -701,6 +730,9 @@ class HopperZoneEpisodeCounter:
             if self._prev_present_t is not None and timestamp - self._prev_present_t > gap_limit:
                 self._reset_pending()
 
+        self.full_recent = (
+            self._last_full_t is not None and timestamp - self._last_full_t <= POUR_FULL_MEMORY_SECONDS
+        )
         self.last_fill = fill
         self.last_control_fill = control_fill
         self.last_baseline = baseline
@@ -734,9 +766,29 @@ class HopperZoneEpisodeCounter:
         self._pending_present = 0
         self._pending_total = 0
         self._pending_full_seen = False
+        self._pending_empty_streak = 0
+        self._pending_poured = False
+
+    def _update_pour(self, looks: list[tuple[float, float, float]] | None, timestamp: float) -> None:
+        """Взгляды детектора по порядку: (любой мешок, полный, пустой)."""
+        for _, full_conf, empty_conf in looks or []:
+            if full_conf >= self.detector_min_conf:
+                self._pending_full_seen = True
+                self._last_full_t = timestamp
+                self._pending_empty_streak = 0
+            elif (
+                empty_conf >= self.detector_min_conf
+                and self._last_full_t is not None
+                and timestamp - self._last_full_t <= POUR_FULL_MEMORY_SECONDS
+            ):
+                self._pending_empty_streak += 1
+                if self._pending_empty_streak >= POUR_EMPTY_LOOKS:
+                    self._pending_poured = True
 
     def _commit(self, frame_position: int, timestamp: float, fill: float) -> bool:
         self._reset_pending()
+        # Засчитанное высыпание израсходовало этот полный мешок.
+        self._last_full_t = None
         self.state = "active"
         self._last_present_t = timestamp
         self._episode_start_t = timestamp
@@ -934,6 +986,9 @@ class BagAnalyticsManager:
         self.detector_full_labels: set[str] = set(DETECTOR_FULL_LABELS)
         self.detector_full_ids: set[int] = set()
         self.detector_zone: ZoneBox = ZONE_DETECTOR_BOX
+        self.require_pour = True
+        self.detector_has_empty = False
+        self.pour_active = False
         self.zone_second: ZoneBox | None = ZONE_SECOND_BOX
         self.zone_counts: list[int] = [0]
         self.zone2_state: str | None = None
@@ -1211,11 +1266,17 @@ class BagAnalyticsManager:
             sample_log = self._open_sample_log()
             detector_model = self._resolve_detector()
             # Вторая воронка - отдельный счётчик только по детектору.
+            self.pour_active = bool(detector_model is not None and self.require_pour and self.detector_has_empty)
+            counter.require_pour = self.pour_active
             counter2 = (
-                self._build_zone_counter(zone=self.zone_second, fill_enabled=False)
+                self._build_zone_counter(
+                    zone=self.zone_second, fill_enabled=False, require_pour=self.pour_active
+                )
                 if detector_model is not None and self.zone_second is not None
                 else None
             )
+            looks1: list[tuple[float, float, float]] = []
+            looks2: list[tuple[float, float, float]] = []
             last_detector_t: float | None = None
             last_detector_conf: float | None = None
             last_detector_full: float | None = None
@@ -1304,6 +1365,20 @@ class BagAnalyticsManager:
                 stream_frame_index += 1
                 fps_window_frames += 1
                 if not is_sample:
+                    # Второй взгляд детектора - кадр посередине между пробами,
+                    # если процессор успевает.
+                    if (
+                        detector_model is not None
+                        and frame_stride >= 2
+                        and sequential_index % frame_stride == frame_stride // 2
+                        and self.detector_period_seconds <= sample_period / 2.0 + 1e-6
+                    ):
+                        ok_mid, mid_frame = capture.retrieve()
+                        if ok_mid and mid_frame is not None:
+                            zone_scores, last_detections = self._timed_detector(detector_model, mid_frame)
+                            looks1.append(zone_scores[0])
+                            if len(zone_scores) > 1:
+                                looks2.append(zone_scores[1])
                     continue
 
                 sampled_frame_index += 1
@@ -1312,26 +1387,26 @@ class BagAnalyticsManager:
                     last_detector_t is None
                     or timestamp - last_detector_t >= self.detector_period_seconds
                 ):
-                    detect_started = time.monotonic()
-                    zone_scores, last_detections = self._run_detector(detector_model, frame)
-                    last_detector_conf, last_detector_full = zone_scores[0]
+                    zone_scores, last_detections = self._timed_detector(detector_model, frame)
+                    looks1.append(zone_scores[0])
                     if len(zone_scores) > 1:
-                        last_detector2 = zone_scores[1]
+                        looks2.append(zone_scores[1])
                     last_detector_t = timestamp
                     detector_fresh = True
-                    # Слабый процессор: период подстраивается так, чтобы детектор
-                    # занимал не больше трети времени цикла.
-                    detect_seconds = time.monotonic() - detect_started
-                    self.detector_period_seconds = max(
-                        float(ZONE_DETECTOR_PERIOD_SECONDS), min(3.0 * detect_seconds, 20.0)
-                    )
-                    self.detector_seconds = detect_seconds
+                # Для присутствия - лучшее за все взгляды с прошлой пробы; без
+                # новых взглядов (слабый процессор) держится последнее значение.
+                if looks1:
+                    last_detector_conf = max(look[0] for look in looks1)
+                    last_detector_full = max(look[1] for look in looks1)
+                if looks2:
+                    last_detector2 = (max(look[0] for look in looks2), max(look[1] for look in looks2))
                 observation = counter.observe(
                     frame=frame,
                     frame_position=sequential_index,
                     timestamp=timestamp,
                     detector_conf=last_detector_conf,
                     detector_full=last_detector_full,
+                    detector_looks=looks1,
                 )
                 observation2 = (
                     counter2.observe(
@@ -1340,12 +1415,15 @@ class BagAnalyticsManager:
                         timestamp=timestamp,
                         detector_conf=last_detector2[0],
                         detector_full=last_detector2[1],
+                        detector_looks=looks2,
                     )
                     if counter2 is not None
                     else None
                 )
                 committed_any = observation.committed or bool(observation2 and observation2.committed)
                 total_count = int(counter.count) + (int(counter2.count) if counter2 is not None else 0)
+                sample_looks = len(looks1)
+                looks1, looks2 = [], []
 
                 if detector_fresh or (detector_model is not None and committed_any):
                     self._maybe_save_detector_frame(
@@ -1401,6 +1479,7 @@ class BagAnalyticsManager:
                         detections=last_detections if detector_model is not None else None,
                         observation2=observation2,
                         counter2=counter2,
+                        looks=sample_looks if detector_model is not None else None,
                     )
 
                 with self.lock:
@@ -1663,6 +1742,8 @@ class BagAnalyticsManager:
             self.detector_names = names
             self.detector_class_ids = class_ids
             self.detector_full_ids = full_ids
+            # Высыпание различимо, только если у модели есть класс пустого мешка.
+            self.detector_has_empty = bool(class_ids - full_ids)
             self.detector_enabled = bool(class_ids) and self.zone_detector_min_conf > 0.0
         return model if self.detector_enabled else None
 
@@ -1678,7 +1759,7 @@ class BagAnalyticsManager:
         """Все рамки модели на кадре и по каждой зоне выгрузки: лучшая уверенность
         мешка любого класса и лучшая уверенность полного мешка."""
         zones = self._detector_zones()
-        empty = [(0.0, 0.0) for _ in zones]
+        empty = [(0.0, 0.0, 0.0) for _ in zones]
         try:
             results = model.predict(
                 source=frame, conf=0.25, imgsz=self.detector_imgsz, device="cpu", verbose=False,
@@ -1690,7 +1771,7 @@ class BagAnalyticsManager:
             return empty, []
         frame_height, frame_width = frame.shape[:2]
         bounds = [_zone_bounds(frame_width, frame_height, zone) for zone in zones]
-        scores = [[0.0, 0.0] for _ in zones]
+        scores = [[0.0, 0.0, 0.0] for _ in zones]
         detections: list[dict[str, Any]] = []
         boxes = result.boxes
         classes = boxes.cls.tolist() if getattr(boxes, "cls", None) is not None else []
@@ -1721,7 +1802,22 @@ class BagAnalyticsManager:
                     scores[zone_index][0] = max(scores[zone_index][0], float(confidence))
                     if full:
                         scores[zone_index][1] = max(scores[zone_index][1], float(confidence))
-        return [(any_conf, full_conf) for any_conf, full_conf in scores], detections
+                    else:
+                        scores[zone_index][2] = max(scores[zone_index][2], float(confidence))
+        return [tuple(score) for score in scores], detections
+
+    def _timed_detector(
+        self, model: YOLO, frame: Any
+    ) -> tuple[list[tuple[float, float, float]], list[dict[str, Any]]]:
+        """Прогон детектора с замером: период подстраивается под процессор."""
+        started = time.monotonic()
+        result = self._run_detector(model, frame)
+        seconds = time.monotonic() - started
+        self.detector_seconds = seconds
+        self.detector_period_seconds = max(
+            float(ZONE_DETECTOR_PERIOD_SECONDS), min(seconds / DETECTOR_MAX_SHARE, 20.0)
+        )
+        return result
 
     def _detect_full_bag(self, model: YOLO, frame: Any) -> float:
         """Лучшая уверенность засчитываемой рамки в зоне 1."""
@@ -1737,7 +1833,7 @@ class BagAnalyticsManager:
         allowed = {
             "zone", "control_zone", "detector_zone", "zone2", "detector_min_conf",
             "detector_min_overlap", "detector_imgsz", "detector_labels", "solid_min",
-            "baseline_margin", "min_present_seconds",
+            "baseline_margin", "min_present_seconds", "require_pour",
         }
         ranges = {
             "detector_min_conf": (0.05, 0.99),
@@ -1773,6 +1869,10 @@ class BagAnalyticsManager:
                 if not 320 <= imgsz <= 1920 or imgsz % 32:
                     raise ValueError("detector_imgsz: от 320 до 1920, кратно 32")
                 updates["detector_imgsz"] = imgsz
+            if "require_pour" in raw:
+                if not isinstance(raw["require_pour"], bool):
+                    raise ValueError("require_pour: true или false")
+                updates["require_pour"] = raw["require_pour"]
             if "detector_labels" in raw:
                 labels = {str(v).strip().lower() for v in raw["detector_labels"] if str(v).strip()}
                 if not labels:
@@ -1786,6 +1886,7 @@ class BagAnalyticsManager:
             "control_zone": "zone_control",
             "detector_zone": "detector_zone",
             "zone2": "zone_second",
+            "require_pour": "require_pour",
             "detector_min_conf": "zone_detector_min_conf",
             "detector_min_overlap": "detector_min_overlap",
             "detector_imgsz": "detector_imgsz",
@@ -1903,7 +2004,7 @@ class BagAnalyticsManager:
         caption = (
             f"{local:%d.%m %H:%M:%S}  fill {observation.fill:.2f} base {observation.baseline:.2f} "
             f"solid {observation.solid:.2f} det {(observation.detector or 0.0):.2f}  "
-            f"z1 {counter.state} {counter.count}"
+            f"z1 {counter.state} {counter.count} full {int(counter.full_recent)} pour {int(counter._pending_poured)}"
             + (f"  z2 {counter2.state} {counter2.count}" if counter2 is not None else "")
         )
         height = image.shape[0]
@@ -1919,11 +2020,12 @@ class BagAnalyticsManager:
         return self._normalize_names(getattr(model, "names", {}))
 
     def _build_zone_counter(
-        self, zone: ZoneBox | None = None, fill_enabled: bool = True
+        self, zone: ZoneBox | None = None, fill_enabled: bool = True, require_pour: bool = False
     ) -> HopperZoneEpisodeCounter:
         return HopperZoneEpisodeCounter(
             zone=zone if zone is not None else self.zone_above_hopper,
             fill_enabled=fill_enabled,
+            require_pour=require_pour,
             control_zone=self.zone_control,
             gray_level=self.zone_gray_level,
             saturation_max=self.zone_saturation_max,
@@ -2265,12 +2367,13 @@ class BagAnalyticsManager:
         detections: list[dict[str, Any]] | None = None,
         observation2: ZoneObservation | None = None,
         counter2: HopperZoneEpisodeCounter | None = None,
+        looks: int | None = None,
     ) -> Any:
         best = max(detections, key=lambda d: d["conf"]) if detections else None
         z2 = observation2 is not None and counter2 is not None
         try:
             handle.write(
-                "%s,%.4f,%.4f,%.4f,%d,%d,%s,%d,%.1f,%d,%d,%d,%s,%.3f,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n"
+                "%s,%.4f,%.4f,%.4f,%d,%d,%s,%d,%.1f,%d,%d,%d,%s,%.3f,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%d,%d,%s\n"
                 % (
                     datetime.now(timezone.utc).isoformat(timespec="seconds"),
                     observation.fill,
@@ -2298,6 +2401,10 @@ class BagAnalyticsManager:
                     "" if not z2 else str(int(observation2.committed)),
                     "" if not z2 else counter2.state,
                     "" if not z2 else str(int(counter2.count)),
+                    "" if looks is None else str(int(looks)),
+                    int(counter.full_recent),
+                    int(counter._pending_poured),
+                    "" if not z2 else str(int(counter2._pending_poured)),
                 )
             )
             handle.flush()
@@ -3926,6 +4033,13 @@ class BagAnalyticsManager:
                 "zone": [float(v) for v in getattr(self, "zone_above_hopper", ZONE_ABOVE_HOPPER)],
                 "control_zone": [float(v) for v in getattr(self, "zone_control", ZONE_CONTROL)],
                 "detector_zone": [float(v) for v in getattr(self, "detector_zone", ZONE_DETECTOR_BOX)],
+                "require_pour": bool(getattr(self, "pour_active", False)),
+                "pour_empty_looks": int(POUR_EMPTY_LOOKS),
+                "detector_mid_looks": bool(
+                    getattr(self, "detector_enabled", False)
+                    and float(getattr(self, "detector_period_seconds", ZONE_DETECTOR_PERIOD_SECONDS))
+                    <= float(getattr(self, "zone_sample_period_seconds", ZONE_SAMPLE_PERIOD_SECONDS)) / 2.0 + 1e-6
+                ),
                 "zone2": (
                     [float(v) for v in self.zone_second]
                     if getattr(self, "zone_second", None) is not None

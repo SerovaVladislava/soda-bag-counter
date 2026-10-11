@@ -56,13 +56,16 @@ def detector_section(rows) -> None:
             current["ov"] = max(current["ov"], r["det_ov"] or 0.0)
             current["ov2"] = max(current["ov2"], r["det_ov2"] or 0.0)
             current["committed"] |= r["z2_committed"]
+            current["full_seen"] |= r["full_seen"] or r["det_cls"] == "bag_full"
+            current["poured"] |= r["poured"]
             current["committed"] |= r["committed"]
         else:
             if current:
                 groups.append(current)
             current = {"start": r["t"], "last": r["t"], "n": 1, "cls": r["det_cls"], "peak": r["det_any"],
                        "cx": r["det_cx"] or 0.0, "cy": r["det_cy"] or 0.0, "ov": r["det_ov"] or 0.0,
-                       "ov2": r["det_ov2"] or 0.0, "committed": r["committed"] or r["z2_committed"]}
+                       "ov2": r["det_ov2"] or 0.0, "committed": r["committed"] or r["z2_committed"],
+                       "full_seen": r["full_seen"] or r["det_cls"] == "bag_full", "poured": r["poured"]}
     groups.append(current)
     print(f"Детектор: модель видела мешок {len(groups)} раз (уверенность от {DET_SHOW}; рамка засчитывается от {DET_COUNT} и при доле в зоне от {DET_OVERLAP})")
     print(f"{'начало':>14} {'длит.':>7} {'класс':>10} {'уверен.':>7} {'центр x,y':>11} {'зона 1':>6} {'зона 2':>6}  вывод")
@@ -74,10 +77,12 @@ def detector_section(rows) -> None:
             verdict = "вне зон выгрузки"
         elif g["peak"] < DET_COUNT:
             verdict = f"в зоне, но уверенность ниже {DET_COUNT}"
-        elif g["cls"] != "bag_full":
-            verdict = "в зоне, но полным мешок так и не был виден"
+        elif g["poured"]:
+            verdict = "высыпание видно, но засчёт не прошёл - мало времени в зоне?"
+        elif g["full_seen"]:
+            verdict = "полный мешок был, высыпания не видно - подержали и унесли?"
         else:
-            verdict = "в зоне и уверенно - разобрать по кадрам"
+            verdict = "в зоне, но полным мешок так и не был виден"
         print(f"{g['start']:%d.%m %H:%M:%S} {dur:>6.0f}с {g['cls']:>10} {g['peak']:>7.2f} {g['cx']:>5.2f},{g['cy']:<5.2f} {g['ov']:>6.2f} {g['ov2']:>6.2f}  {verdict}")
     if len(groups) > 80:
         print(f"  ... и ещё {len(groups) - 80}")
@@ -114,6 +119,8 @@ def main() -> int:
                         "det_ov2": float(raw["det_ov2"]) if raw.get("det_ov2") else None,
                         "z2_committed": raw.get("z2_committed") == "1",
                         "z2_count": int(raw["z2_count"]) if raw.get("z2_count") else None,
+                        "full_seen": raw.get("full_seen") == "1",
+                        "poured": raw.get("poured") == "1" or raw.get("z2_poured") == "1",
                     }
                 )
             except (KeyError, ValueError):
