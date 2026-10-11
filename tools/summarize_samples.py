@@ -34,7 +34,7 @@ def parse_time(value: str) -> datetime:
 
 
 DET_SHOW = 0.35          # с какой уверенности рамка модели попадает в сводку
-DET_COUNT = 0.6          # ZONE_DETECTOR_MIN_CONF - засчитываемая уверенность
+DET_COUNT = 0.5          # ZONE_DETECTOR_MIN_CONF - засчитываемая уверенность
 DET_OVERLAP = 0.3        # ZONE_DETECTOR_MIN_OVERLAP - доля рамки в зоне
 
 
@@ -54,29 +54,31 @@ def detector_section(rows) -> None:
             current["n"] += 1
             current["peak"] = max(current["peak"], r["det_any"])
             current["ov"] = max(current["ov"], r["det_ov"] or 0.0)
+            current["ov2"] = max(current["ov2"], r["det_ov2"] or 0.0)
+            current["committed"] |= r["z2_committed"]
             current["committed"] |= r["committed"]
         else:
             if current:
                 groups.append(current)
             current = {"start": r["t"], "last": r["t"], "n": 1, "cls": r["det_cls"], "peak": r["det_any"],
                        "cx": r["det_cx"] or 0.0, "cy": r["det_cy"] or 0.0, "ov": r["det_ov"] or 0.0,
-                       "committed": r["committed"]}
+                       "ov2": r["det_ov2"] or 0.0, "committed": r["committed"] or r["z2_committed"]}
     groups.append(current)
     print(f"Детектор: модель видела мешок {len(groups)} раз (уверенность от {DET_SHOW}; рамка засчитывается от {DET_COUNT} и при доле в зоне от {DET_OVERLAP})")
-    print(f"{'начало':>14} {'длит.':>7} {'класс':>10} {'уверен.':>7} {'центр x,y':>11} {'в зоне':>6}  вывод")
+    print(f"{'начало':>14} {'длит.':>7} {'класс':>10} {'уверен.':>7} {'центр x,y':>11} {'зона 1':>6} {'зона 2':>6}  вывод")
     for g in groups[:80]:
         dur = (g["last"] - g["start"]).total_seconds()
         if g["committed"]:
             verdict = "засчитан"
-        elif g["ov"] < DET_OVERLAP:
-            verdict = "вне зоны над бункером"
+        elif max(g["ov"], g["ov2"]) < DET_OVERLAP:
+            verdict = "вне зон выгрузки"
         elif g["peak"] < DET_COUNT:
             verdict = f"в зоне, но уверенность ниже {DET_COUNT}"
         elif g["cls"] != "bag_full":
-            verdict = "в зоне, но класс не bag_full"
+            verdict = "в зоне, но полным мешок так и не был виден"
         else:
             verdict = "в зоне и уверенно - разобрать по кадрам"
-        print(f"{g['start']:%d.%m %H:%M:%S} {dur:>6.0f}с {g['cls']:>10} {g['peak']:>7.2f} {g['cx']:>5.2f},{g['cy']:<5.2f} {g['ov']:>6.2f}  {verdict}")
+        print(f"{g['start']:%d.%m %H:%M:%S} {dur:>6.0f}с {g['cls']:>10} {g['peak']:>7.2f} {g['cx']:>5.2f},{g['cy']:<5.2f} {g['ov']:>6.2f} {g['ov2']:>6.2f}  {verdict}")
     if len(groups) > 80:
         print(f"  ... и ещё {len(groups) - 80}")
 
@@ -109,6 +111,9 @@ def main() -> int:
                         "det_cx": float(raw["det_cx"]) if raw.get("det_cx") else None,
                         "det_cy": float(raw["det_cy"]) if raw.get("det_cy") else None,
                         "det_ov": float(raw["det_ov"]) if raw.get("det_ov") else None,
+                        "det_ov2": float(raw["det_ov2"]) if raw.get("det_ov2") else None,
+                        "z2_committed": raw.get("z2_committed") == "1",
+                        "z2_count": int(raw["z2_count"]) if raw.get("z2_count") else None,
                     }
                 )
             except (KeyError, ValueError):
@@ -130,7 +135,9 @@ def main() -> int:
 
     print(f"Журнал: {LOG}")
     print(f"Период: {first:%d.%m %H:%M} - {last:%d.%m %H:%M} ({hours:.1f} ч), проб {len(rows)}")
-    print(f"Засчитано мешков за период: {sum(1 for r in rows if r['committed'])}, счётчик на конце журнала: {rows[-1]['count']}")
+    z1 = sum(1 for r in rows if r["committed"])
+    z2 = sum(1 for r in rows if r.get("z2_committed"))
+    print(f"Засчитано мешков за период: {z1 + z2} (зона 1 - {z1}, зона 2 - {z2}), счётчик зоны 1 на конце журнала: {rows[-1]['count']}")
     print()
     print("Пустая зона (пробы без мешка):")
     print(f"  медиана {pct(idle, 0.5):.3f}   p95 {pct(idle, 0.95):.3f}   максимум {idle[-1] if idle else 0:.3f}")
