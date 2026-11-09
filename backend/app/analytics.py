@@ -46,7 +46,12 @@ STALL_MIN_SAMPLES = 10
 # данными), ограничен по размеру и никогда не мешает подсчёту.
 SAMPLE_LOG_DIR = os.environ.get("BAG_SAMPLE_LOG_DIR", "/app/uploads")
 SAMPLE_LOG_NAME = "zone_samples.csv"
-SAMPLE_LOG_MAX_BYTES = 25 * 1024 * 1024
+# Журнал проб: около 5 МБ в сутки. Файл переворачивается по размеру прямо
+# во время записи, старые копии сдвигаются .1 -> .2 -> .3, самая старая
+# удаляется: так хранится около месяца, а не только предыдущий файл.
+SAMPLE_LOG_MAX_BYTES = 50 * 1024 * 1024
+SAMPLE_LOG_KEEP = 3
+SAMPLE_LOG_CHECK_ROWS = 500
 SAMPLE_LOG_HEADER = (
     "time_utc,fill,control,baseline,present,committed,state,"
     "pending_hits,pending_seconds,suppressed,stalled,count,motion,solid,det,"
@@ -139,6 +144,19 @@ POUR_EMPTY_LOOKS = 2
 # его на время потерять. На записи 08.09.2025 - полный до 694 с, уверенности
 # нет 696-710 с, пустой с 712 с: без памяти эта выгрузка не засчитывалась.
 POUR_FULL_MEMORY_SECONDS = 60.0
+# Засчёт только с подтверждением модели: за время накопления мешок хотя бы
+# раз был виден полным в зоне. Заполнение зоны только держит эпизод. На
+# объекте 11.10-09.11 все выгрузки, где модель видела мешок, имели
+# уверенность 0.93-0.97, а 17 засчётов 24.10 22:49 - 25.10 00:22 были по
+# одному заполнению: полтора часа модель не видела в зоне ни одного мешка,
+# заполнение росло до 0.9 при нулевой сплошности - пар или пыль.
+ZONE_REQUIRE_DETECTOR = True
+# Правая воронка (зона 2) по умолчанию только наблюдается: рамки и кадры
+# пишутся, в счёт не идут. С 28.10 по 09.11 все 6 её засчётов были на
+# облаке пара над воронкой (модель принимала его за мешок 0.65-0.90), а
+# ни одной подтверждённой выгрузки в неё не было. Включить в счёт -
+# "zone2_count": true в zone_config.json.
+ZONE_SECOND_COUNT = False
 # Диагностика детектора. Журнал пишет не только итог проверки «полный мешок в
 # зоне», но и лучшую рамку модели в любом месте кадра: класс, уверенность,
 # центр и долю рамки в зоне. Кадры, где модель видит мешок, сохраняются сами
@@ -411,6 +429,7 @@ class HopperZoneEpisodeCounter:
         detector_min_conf: float = ZONE_DETECTOR_MIN_CONF,
         fill_enabled: bool = True,
         require_pour: bool = False,
+        require_detector: bool = False,
         baseline_window: int = ZONE_BASELINE_WINDOW,
         baseline_percentile: float = ZONE_BASELINE_PERCENTILE,
         baseline_min_samples: int = ZONE_BASELINE_MIN_SAMPLES,
@@ -444,6 +463,8 @@ class HopperZoneEpisodeCounter:
         # откалибровано, присутствие и засчёт - только по модели.
         self.fill_enabled = bool(fill_enabled)
         self.require_pour = bool(require_pour)
+        # Без полного мешка от модели заполнение само засчитать не может.
+        self.require_detector = bool(require_detector)
         self._pending_full_seen = False
         self._pending_empty_streak = 0
         self._pending_poured = False
@@ -712,7 +733,11 @@ class HopperZoneEpisodeCounter:
                 and (
                     self._pending_poured
                     if self.require_pour
-                    else (fill_ok or self._pending_full_seen)
+                    else (
+                        self._pending_full_seen
+                        if self.require_detector
+                        else (fill_ok or self._pending_full_seen)
+                    )
                 )
                 and self.pending_hits >= self.min_present_hits
                 and present_span >= self.min_present_seconds
@@ -987,6 +1012,9 @@ class BagAnalyticsManager:
         self.detector_full_ids: set[int] = set()
         self.detector_zone: ZoneBox = ZONE_DETECTOR_BOX
         self.require_pour = True
+        self.require_detector = ZONE_REQUIRE_DETECTOR
+        self.detector_required_active = False
+        self.zone2_count = ZONE_SECOND_COUNT
         self.detector_has_empty = False
         self.pour_active = False
         self.zone_second: ZoneBox | None = ZONE_SECOND_BOX
@@ -1268,11 +1296,15 @@ class BagAnalyticsManager:
             # Вторая воронка - отдельный счётчик только по детектору.
             self.pour_active = bool(detector_model is not None and self.require_pour and self.detector_has_empty)
             counter.require_pour = self.pour_active
+            self.detector_required_active = bool(detector_model is not None and self.require_detector)
+            counter.require_detector = self.detector_required_active
+            # Без "zone2_count" счётчик правой воронки не строится вовсе: её
+            # рамки всё равно попадают в журнал (det_ov2) и в кадры детектора.
             counter2 = (
                 self._build_zone_counter(
                     zone=self.zone_second, fill_enabled=False, require_pour=self.pour_active
                 )
-                if detector_model is not None and self.zone_second is not None
+                if detector_model is not None and self.zone_second is not None and self.zone2_count
                 else None
             )
             looks1: list[tuple[float, float, float]] = []
@@ -1834,6 +1866,7 @@ class BagAnalyticsManager:
             "zone", "control_zone", "detector_zone", "zone2", "detector_min_conf",
             "detector_min_overlap", "detector_imgsz", "detector_labels", "solid_min",
             "baseline_margin", "min_present_seconds", "require_pour",
+            "require_detector", "zone2_count",
         }
         ranges = {
             "detector_min_conf": (0.05, 0.99),
@@ -1869,10 +1902,11 @@ class BagAnalyticsManager:
                 if not 320 <= imgsz <= 1920 or imgsz % 32:
                     raise ValueError("detector_imgsz: от 320 до 1920, кратно 32")
                 updates["detector_imgsz"] = imgsz
-            if "require_pour" in raw:
-                if not isinstance(raw["require_pour"], bool):
-                    raise ValueError("require_pour: true или false")
-                updates["require_pour"] = raw["require_pour"]
+            for key in ("require_pour", "require_detector", "zone2_count"):
+                if key in raw:
+                    if not isinstance(raw[key], bool):
+                        raise ValueError(f"{key}: true или false")
+                    updates[key] = raw[key]
             if "detector_labels" in raw:
                 labels = {str(v).strip().lower() for v in raw["detector_labels"] if str(v).strip()}
                 if not labels:
@@ -1887,6 +1921,8 @@ class BagAnalyticsManager:
             "detector_zone": "detector_zone",
             "zone2": "zone_second",
             "require_pour": "require_pour",
+            "require_detector": "require_detector",
+            "zone2_count": "zone2_count",
             "detector_min_conf": "zone_detector_min_conf",
             "detector_min_overlap": "detector_min_overlap",
             "detector_imgsz": "detector_imgsz",
@@ -2348,7 +2384,12 @@ class BagAnalyticsManager:
                 with path.open("r", encoding="utf-8") as existing:
                     rotate = existing.readline() != SAMPLE_LOG_HEADER
             if rotate:
+                for index in range(SAMPLE_LOG_KEEP, 1, -1):
+                    older = directory / f"{SAMPLE_LOG_NAME}.{index - 1}"
+                    if older.exists():
+                        older.replace(directory / f"{SAMPLE_LOG_NAME}.{index}")
                 path.replace(directory / (SAMPLE_LOG_NAME + ".1"))
+            self._sample_log_rows = 0
             fresh = not path.exists()
             handle = path.open("a", encoding="utf-8")
             if fresh:
@@ -2408,6 +2449,14 @@ class BagAnalyticsManager:
                 )
             )
             handle.flush()
+            # Размер проверялся только при открытии, и за две недели без
+            # перезапуска журнал дорастал до 65 МБ: проверяем и по ходу.
+            self._sample_log_rows = int(getattr(self, "_sample_log_rows", 0)) + 1
+            if self._sample_log_rows >= SAMPLE_LOG_CHECK_ROWS:
+                self._sample_log_rows = 0
+                if os.fstat(handle.fileno()).st_size > SAMPLE_LOG_MAX_BYTES:
+                    handle.close()
+                    return self._open_sample_log()
             return handle
         except Exception:
             try:
@@ -4034,6 +4083,8 @@ class BagAnalyticsManager:
                 "control_zone": [float(v) for v in getattr(self, "zone_control", ZONE_CONTROL)],
                 "detector_zone": [float(v) for v in getattr(self, "detector_zone", ZONE_DETECTOR_BOX)],
                 "require_pour": bool(getattr(self, "pour_active", False)),
+                "require_detector": bool(getattr(self, "detector_required_active", False)),
+                "zone2_count": bool(getattr(self, "zone2_count", ZONE_SECOND_COUNT)),
                 "pour_empty_looks": int(POUR_EMPTY_LOOKS),
                 "detector_mid_looks": bool(
                     getattr(self, "detector_enabled", False)
