@@ -192,6 +192,14 @@ def main() -> int:
         return 0
 
     has_det = any(r["det_any"] is not None for r in rows)
+    # Полный мешок вне зоны 1 - его несут к воронке (ZONE_ENTRY_MAX_OVERLAP 0.15)
+    outside_full = [r["t"] for r in rows
+                    if r["det_cls"] == "bag_full" and (r["det_any"] or 0) >= DET_COUNT
+                    and r["det_ov"] is not None and r["det_ov"] < 0.15]
+
+    def brought(e) -> bool:
+        lo = e["start"] - timedelta(seconds=120)
+        return any(lo <= t <= e["last"] for t in outside_full)
     print(f"Появления в зоне: {len(events)}")
     print(f"{'начало':>14} {'длит.':>7} {'проб':>5} {'пик':>6} {'детект':>6}  решение")
     for e in events:
@@ -208,6 +216,8 @@ def main() -> int:
             verdict = "не засчитан: пробы с мешком - меньше половины (отсечено контрольной зоной или потолком)"
         elif has_det and e["det"] < DET_COUNT:
             verdict = "не засчитан: модель мешка в зоне не видела - одно заполнение (пар, пыль, свет)"
+        elif has_det and not brought(e):
+            verdict = "не засчитан: мешок не приносили - тот же мешок на месте или пар (полного вне зоны не было)"
         else:
             verdict = "НЕ ЗАСЧИТАН - разобрать по журналу"
         print(f"{e['start']:%d.%m %H:%M:%S} {dur:>6.0f}с {e['n']:>5} {e['peak']:>6.3f} {e['det']:>6.2f}  {verdict}")

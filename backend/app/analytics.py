@@ -151,6 +151,18 @@ POUR_FULL_MEMORY_SECONDS = 60.0
 # одному заполнению: полтора часа модель не видела в зоне ни одного мешка,
 # заполнение росло до 0.9 при нулевой сплошности - пар или пыль.
 ZONE_REQUIRE_DETECTOR = True
+# Засчёт только принесённого мешка: после прошлого засчёта модель видела
+# полный мешок ВНЕ зоны (доля рамки в зоне меньше ZONE_ENTRY_MAX_OVERLAP),
+# не раньше ZONE_ENTRY_SECONDS до засчёта. На объекте 13-14.11 все 12
+# настоящих выгрузок так и выглядят: мешок несут снизу или слева и он
+# въезжает в зону за 10-45 с до засчёта. Без этого 14.11 16:02 один мешок,
+# висевший над воронкой 6 минут, засчитан трижды (модель на полминуты
+# теряла его, эпизод закрывался и открывался снова на том же месте), а
+# ночью 13-14.11 одиночные рамки "полный мешок" в пару над воронкой
+# давали засчёты без единого мешка.
+ZONE_REQUIRE_ENTRY = True
+ZONE_ENTRY_SECONDS = 120.0
+ZONE_ENTRY_MAX_OVERLAP = 0.15
 # Правая воронка (зона 2) по умолчанию только наблюдается: рамки и кадры
 # пишутся, в счёт не идут. С 28.10 по 09.11 все 6 её засчётов были на
 # облаке пара над воронкой (модель принимала его за мешок 0.65-0.90), а
@@ -430,6 +442,7 @@ class HopperZoneEpisodeCounter:
         fill_enabled: bool = True,
         require_pour: bool = False,
         require_detector: bool = False,
+        require_entry: bool = False,
         baseline_window: int = ZONE_BASELINE_WINDOW,
         baseline_percentile: float = ZONE_BASELINE_PERCENTILE,
         baseline_min_samples: int = ZONE_BASELINE_MIN_SAMPLES,
@@ -465,6 +478,11 @@ class HopperZoneEpisodeCounter:
         self.require_pour = bool(require_pour)
         # Без полного мешка от модели заполнение само засчитать не может.
         self.require_detector = bool(require_detector)
+        # Засчёт только если после прошлого засчёта полный мешок видели вне
+        # зоны - его принесли, а не тот же мешок снова нашёлся на месте.
+        self.require_entry = bool(require_entry)
+        self._last_outside_full_t: float | None = None
+        self._last_commit_t: float | None = None
         self._pending_full_seen = False
         self._pending_empty_streak = 0
         self._pending_poured = False
@@ -603,6 +621,9 @@ class HopperZoneEpisodeCounter:
         detector_looks: list[tuple[float, float, float]] | None = None,
     ) -> ZoneObservation:
         self._track_spacing(timestamp)
+        for look in detector_looks or []:
+            if len(look) > 3 and look[3] >= self.detector_min_conf:
+                self._last_outside_full_t = timestamp
         fill = _zone_fill(frame, self.zone, self.gray_level, self.saturation_max)
         control_fill = (
             _zone_fill(frame, self.control_zone, self.gray_level, self.saturation_max)
@@ -730,6 +751,7 @@ class HopperZoneEpisodeCounter:
             fraction = self._pending_present / max(self._pending_total, 1)
             if (
                 commit_allowed
+                and (not self.require_entry or self.entry_seen(timestamp))
                 and (
                     self._pending_poured
                     if self.require_pour
@@ -794,9 +816,17 @@ class HopperZoneEpisodeCounter:
         self._pending_empty_streak = 0
         self._pending_poured = False
 
-    def _update_pour(self, looks: list[tuple[float, float, float]] | None, timestamp: float) -> None:
-        """Взгляды детектора по порядку: (любой мешок, полный, пустой)."""
-        for _, full_conf, empty_conf in looks or []:
+    def entry_seen(self, timestamp: float) -> bool:
+        """Полный мешок видели вне зоны после прошлого засчёта и недавно."""
+        seen = self._last_outside_full_t
+        if seen is None or timestamp - seen > ZONE_ENTRY_SECONDS:
+            return False
+        return self._last_commit_t is None or seen > self._last_commit_t
+
+    def _update_pour(self, looks: list[tuple[float, ...]] | None, timestamp: float) -> None:
+        """Взгляды детектора по порядку: (любой мешок, полный, пустой, полный вне зоны)."""
+        for look in looks or []:
+            full_conf, empty_conf = look[1], look[2]
             if full_conf >= self.detector_min_conf:
                 self._pending_full_seen = True
                 self._last_full_t = timestamp
@@ -827,6 +857,7 @@ class HopperZoneEpisodeCounter:
         # the latch here keeps the operator message from claiming the count is
         # frozen while it is visibly rising again.
         self.degraded = False
+        self._last_commit_t = timestamp
         self._commit_timestamps.append(timestamp)
         self.count += 1
         self._open_episode = {
@@ -1013,6 +1044,8 @@ class BagAnalyticsManager:
         self.detector_zone: ZoneBox = ZONE_DETECTOR_BOX
         self.require_pour = True
         self.require_detector = ZONE_REQUIRE_DETECTOR
+        self.require_entry = ZONE_REQUIRE_ENTRY
+        self.entry_active = False
         self.detector_required_active = False
         self.zone2_count = ZONE_SECOND_COUNT
         self.detector_has_empty = False
@@ -1298,6 +1331,8 @@ class BagAnalyticsManager:
             counter.require_pour = self.pour_active
             self.detector_required_active = bool(detector_model is not None and self.require_detector)
             counter.require_detector = self.detector_required_active
+            self.entry_active = bool(self.detector_required_active and self.require_entry)
+            counter.require_entry = self.entry_active
             # Без "zone2_count" счётчик правой воронки не строится вовсе: её
             # рамки всё равно попадают в журнал (det_ov2) и в кадры детектора.
             counter2 = (
@@ -1791,7 +1826,7 @@ class BagAnalyticsManager:
         """Все рамки модели на кадре и по каждой зоне выгрузки: лучшая уверенность
         мешка любого класса и лучшая уверенность полного мешка."""
         zones = self._detector_zones()
-        empty = [(0.0, 0.0, 0.0) for _ in zones]
+        empty = [(0.0, 0.0, 0.0, 0.0) for _ in zones]
         try:
             results = model.predict(
                 source=frame, conf=0.25, imgsz=self.detector_imgsz, device="cpu", verbose=False,
@@ -1803,7 +1838,7 @@ class BagAnalyticsManager:
             return empty, []
         frame_height, frame_width = frame.shape[:2]
         bounds = [_zone_bounds(frame_width, frame_height, zone) for zone in zones]
-        scores = [[0.0, 0.0, 0.0] for _ in zones]
+        scores = [[0.0, 0.0, 0.0, 0.0] for _ in zones]
         detections: list[dict[str, Any]] = []
         boxes = result.boxes
         classes = boxes.cls.tolist() if getattr(boxes, "cls", None) is not None else []
@@ -1836,6 +1871,8 @@ class BagAnalyticsManager:
                         scores[zone_index][1] = max(scores[zone_index][1], float(confidence))
                     else:
                         scores[zone_index][2] = max(scores[zone_index][2], float(confidence))
+                elif counts and full and overlap < ZONE_ENTRY_MAX_OVERLAP:
+                    scores[zone_index][3] = max(scores[zone_index][3], float(confidence))
         return [tuple(score) for score in scores], detections
 
     def _timed_detector(
@@ -1866,7 +1903,7 @@ class BagAnalyticsManager:
             "zone", "control_zone", "detector_zone", "zone2", "detector_min_conf",
             "detector_min_overlap", "detector_imgsz", "detector_labels", "solid_min",
             "baseline_margin", "min_present_seconds", "require_pour",
-            "require_detector", "zone2_count",
+            "require_detector", "zone2_count", "require_entry",
         }
         ranges = {
             "detector_min_conf": (0.05, 0.99),
@@ -1902,7 +1939,7 @@ class BagAnalyticsManager:
                 if not 320 <= imgsz <= 1920 or imgsz % 32:
                     raise ValueError("detector_imgsz: от 320 до 1920, кратно 32")
                 updates["detector_imgsz"] = imgsz
-            for key in ("require_pour", "require_detector", "zone2_count"):
+            for key in ("require_pour", "require_detector", "zone2_count", "require_entry"):
                 if key in raw:
                     if not isinstance(raw[key], bool):
                         raise ValueError(f"{key}: true или false")
@@ -1923,6 +1960,7 @@ class BagAnalyticsManager:
             "require_pour": "require_pour",
             "require_detector": "require_detector",
             "zone2_count": "zone2_count",
+            "require_entry": "require_entry",
             "detector_min_conf": "zone_detector_min_conf",
             "detector_min_overlap": "detector_min_overlap",
             "detector_imgsz": "detector_imgsz",
@@ -4085,6 +4123,7 @@ class BagAnalyticsManager:
                 "require_pour": bool(getattr(self, "pour_active", False)),
                 "require_detector": bool(getattr(self, "detector_required_active", False)),
                 "zone2_count": bool(getattr(self, "zone2_count", ZONE_SECOND_COUNT)),
+                "require_entry": bool(getattr(self, "entry_active", False)),
                 "pour_empty_looks": int(POUR_EMPTY_LOOKS),
                 "detector_mid_looks": bool(
                     getattr(self, "detector_enabled", False)
