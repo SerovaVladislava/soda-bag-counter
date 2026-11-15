@@ -163,6 +163,14 @@ ZONE_REQUIRE_DETECTOR = True
 ZONE_REQUIRE_ENTRY = True
 ZONE_ENTRY_SECONDS = 120.0
 ZONE_ENTRY_MAX_OVERLAP = 0.15
+# Взгляд "полный мешок вне зоны" считается приносом, только если перед ним
+# ZONE_ENTRY_CLEAR_SECONDS полного мешка в зоне не было: висящий над
+# воронкой мешок, чья рамка на миг съехала за край зоны, - не новый мешок.
+ZONE_ENTRY_CLEAR_SECONDS = 20.0
+# Принесённый мешок должен провисеть в зоне не меньше этого: 14.11 21:09
+# полный мешок пронесли краем зоны вниз за 10 с, и он был засчитан.
+# Настоящие выгрузки на объекте держатся в зоне от 50 с.
+ZONE_ENTRY_MIN_PRESENT_SECONDS = 30.0
 # Правая воронка (зона 2) по умолчанию только наблюдается: рамки и кадры
 # пишутся, в счёт не идут. С 28.10 по 09.11 все 6 её засчётов были на
 # облаке пара над воронкой (модель принимала его за мешок 0.65-0.90), а
@@ -482,6 +490,7 @@ class HopperZoneEpisodeCounter:
         # зоны - его принесли, а не тот же мешок снова нашёлся на месте.
         self.require_entry = bool(require_entry)
         self._last_outside_full_t: float | None = None
+        self._last_full_in_zone_t: float | None = None
         self._last_commit_t: float | None = None
         self._pending_full_seen = False
         self._pending_empty_streak = 0
@@ -622,7 +631,12 @@ class HopperZoneEpisodeCounter:
     ) -> ZoneObservation:
         self._track_spacing(timestamp)
         for look in detector_looks or []:
-            if len(look) > 3 and look[3] >= self.detector_min_conf:
+            if len(look) > 1 and look[1] >= self.detector_min_conf:
+                self._last_full_in_zone_t = timestamp
+            elif len(look) > 3 and look[3] >= self.detector_min_conf and (
+                self._last_full_in_zone_t is None
+                or timestamp - self._last_full_in_zone_t >= ZONE_ENTRY_CLEAR_SECONDS
+            ):
                 self._last_outside_full_t = timestamp
         fill = _zone_fill(frame, self.zone, self.gray_level, self.saturation_max)
         control_fill = (
@@ -710,6 +724,17 @@ class HopperZoneEpisodeCounter:
         fill_ok = self.fill_enabled and fill >= baseline + self.baseline_margin
         commit_allowed = (not self._suppressed_until_clear) and (fill_ok or detector_hit)
         committed = False
+
+        # Новый принесённый мешок, пока эпизод прошлого ещё открыт: после
+        # высыпания пыль держит заполнение, и 13.11 в 15:36 мешок, внесённый
+        # через две минуты после того, как унесли пустой, не засчитался.
+        if (
+            self.state == "active"
+            and self.require_entry
+            and full_hit
+            and self.entry_seen(timestamp)
+        ):
+            self._close_episode()
 
         if self.state == "active":
             if present:
@@ -1333,6 +1358,10 @@ class BagAnalyticsManager:
             counter.require_detector = self.detector_required_active
             self.entry_active = bool(self.detector_required_active and self.require_entry)
             counter.require_entry = self.entry_active
+            if self.entry_active:
+                counter.min_present_seconds = max(
+                    counter.min_present_seconds, ZONE_ENTRY_MIN_PRESENT_SECONDS
+                )
             # Без "zone2_count" счётчик правой воронки не строится вовсе: её
             # рамки всё равно попадают в журнал (det_ov2) и в кадры детектора.
             counter2 = (
